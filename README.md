@@ -118,9 +118,10 @@ docs/                    DATABASE.md, RELEASING.md, ARCHITECTURE.md, TELEMETRY.m
 
 ## Verification gate
 
-Everything must pass before a change is "done". CI runs `npm run check` on all three
-OSes; the app-bundle build is local-only (or the manual **Build app** workflow,
-`.github/workflows/build.yml`) to save Actions minutes:
+Everything must pass before a change is "done" — run it locally. Push/PR CI is
+kept cheap for the GitHub free plan (one Linux runner: frontend tests + build,
+`cargo fmt --check`; nothing compiles Rust). Clippy + tests and app bundles are
+manual workflows (`rust-checks.yml`, `build.yml`):
 
 ```sh
 npm run check           # frontend tests + build, cargo fmt/clippy/test

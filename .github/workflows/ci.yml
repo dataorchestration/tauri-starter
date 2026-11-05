@@ -1,7 +1,11 @@
-# The verification gate, on every platform the app ships to. Mirrors the local
-# `npm run check`. App bundle builds are NOT run here (many minutes per OS,
-# and macOS minutes bill at 10x on the free plan) — use the manual
-# "Build app" workflow (build.yml) when you need installers.
+# Push/PR CI, kept deliberately cheap for the GitHub free plan: nothing here
+# compiles Rust. One Linux runner (1x minutes) runs the frontend tests + build
+# and `cargo fmt --check` (parses only, no build).
+#
+# Anything that compiles the crate is manual (Actions tab → Run workflow):
+#   rust-checks.yml   cargo clippy -D warnings + cargo test
+#   build.yml         app bundle (tauri build)
+# Run the full gate locally before merging (see CLAUDE.md).
 name: CI
 
 on:
@@ -10,73 +14,32 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   check:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: macOS, os: macos-14 }
-          - { name: Windows, os: windows-latest }
-          - { name: Linux, os: ubuntu-22.04 }
+    name: Frontend + Rust format
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Linux build deps (webkit2gtk, appindicator)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-
-      # SQLCipher's vendored OpenSSL needs perl + nasm on MSVC.
-      - name: Windows build deps (nasm)
-        if: runner.os == 'Windows'
-        uses: ilammy/setup-nasm@v1
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
       - run: npm ci
 
-      # --- Frontend ---
-      - name: Frontend tests
+      - name: Frontend unit tests
         run: npm run test
-      - name: Frontend build
+      - name: Frontend production build
         run: npm run build
 
-      # --- Rust core ---
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - name: Rust formatting
         working-directory: src-tauri
         run: cargo fmt --all --check
-      - name: Rust clippy
-        working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Rust tests
-        working-directory: src-tauri
-        run: cargo test --all-targets
-
-      # Reuse each runner/dependency cache for both opt-in Turso selections.
-      # The initial steps above validate the checked-in template choice.
-      - name: Check optional Turso backends
-        shell: bash
-        run: |
-          for import_sqlcipher in false true; do
-            node scripts/configure.mjs --database turso --import-sqlcipher "$import_sqlcipher"
-            cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-            cargo test --manifest-path src-tauri/Cargo.toml --all-targets
-          done
