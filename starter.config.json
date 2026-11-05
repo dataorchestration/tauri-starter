@@ -1,0 +1,38 @@
+{
+  "$comment": "Single source of feature toggles. Read by Rust (include_str! in src-tauri/src/config.rs) and by the frontend (vite define -> __STARTER_CONFIG__). App name/identifier/version live in src-tauri/tauri.conf.json; run `npm run configure` to set everything at once.",
+  "app": {
+    "org": "Example Inc",
+    "homepage": "https://example.com",
+    "supportUrl": "https://github.com/OWNER/REPO/issues",
+    "docsUrl": "https://github.com/OWNER/REPO#readme"
+  },
+  "features": {
+    "tray": true,
+    "singleInstance": true,
+    "windowState": true,
+    "autostart": true,
+    "updater": false,
+    "notifications": true
+  },
+  "permissions": {
+    "$comment": "Permissions the health check reports. `required` ones block onboarding until granted; `optional` ones are shown but never block. Values: notifications, accessibility, screen_recording, microphone, camera, input_monitoring.",
+    "required": [],
+    "optional": ["notifications"]
+  },
+  "telemetry": {
+    "$comment": "Telemetry is OPT-IN: nothing is sent until the user enables it in Settings. Sinks with empty endpoints/DSNs are skipped. The file sink always writes local logs.",
+    "defaultEnabled": false,
+    "sinks": {
+      "file": { "enabled": true, "maxFiles": 7 },
+      "sentry": { "dsn": "" },
+      "http": { "endpoint": "", "apiKeyHeader": "x-api-key", "apiKey": "", "batchSize": 20, "flushIntervalSecs": 5 }
+    }
+  },
+  "i18n": {
+    "default": "en",
+    "supported": ["en", "es"]
+  },
+  "ui": {
+    "defaultTheme": "system"
+  }
+}

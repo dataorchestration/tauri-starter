@@ -1,0 +1,72 @@
+[package]
+name = "tauri-starter"
+version = "0.1.0"
+description = "Hello Desktop"
+authors = ["you"]
+edition = "2024"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name (Windows).
+name = "tauri_starter_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-os = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# Encrypted local store: SQLCipher compiled in (no system SQLite needed), key in
+# the OS keychain. See src/db/.
+rusqlite = { version = "0.41", features = ["bundled-sqlcipher-vendored-openssl"] }
+keyring = "4"
+getrandom = "0.4"
+# Structured logging: `tracing` facade, file appender, plus our own telemetry
+# layer that fans events out to the configured sinks (src/telemetry/).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde", "local-offset"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+sys-locale = "0.3"
+# Optional sinks (cargo features below).
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"], optional = true }
+sentry = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "debug-images", "reqwest", "rustls"], optional = true }
+
+# Desktop-only plugins (not available on mobile targets).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-autostart = "2"
+
+# macOS permission checks are pure Rust FFI (no Swift bridge) so the template
+# stays cross-platform. See src/permissions.rs.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice", "AVMediaFormat"] }
+block2 = "0.6"
+
+[features]
+default = ["telemetry-http", "telemetry-sentry"]
+# Batched HTTPS event sink (point it at your own ingest endpoint / worker).
+telemetry-http = ["dep:reqwest"]
+# Sentry error + crash reporting.
+telemetry-sentry = ["dep:sentry"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+# Panics abort after the crash hook has written its report (src/crash.rs).
+panic = "abort"
+strip = true

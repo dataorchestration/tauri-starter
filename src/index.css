@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+/* Dark mode is driven by data-theme (set in src/lib/theme.ts from the user's
+   setting), not by prefers-color-scheme alone, so "System / Light / Dark" works. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ---------------------------------------------------------------------------
+   Design tokens. Two layers:
+   1. Raw palette + per-theme semantic values as plain CSS variables (below).
+   2. Tailwind theme tokens that *reference* those variables (`@theme inline`),
+      so utilities like `bg-surface text-fg border-line` flip with the theme.
+   Swap the values here to re-skin every component.
+   ------------------------------------------------------------------------- */
+:root {
+  --t-surface: #f7f7f8;
+  --t-surface-2: #ffffff;
+  --t-surface-3: #eef0f3;
+  --t-fg: #15161a;
+  --t-fg-muted: #5e626b;
+  --t-line: #e2e4e9;
+  --t-accent: #4f46e5;
+  --t-accent-fg: #ffffff;
+  --t-success: #15803d;
+  --t-warning: #b45309;
+  --t-danger: #b91c1c;
+  --t-focus: #818cf8;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --t-surface: #111217;
+  --t-surface-2: #1a1b22;
+  --t-surface-3: #23242d;
+  --t-fg: #ececf1;
+  --t-fg-muted: #9a9ead;
+  --t-line: #2b2d37;
+  --t-accent: #818cf8;
+  --t-accent-fg: #0b0c10;
+  --t-success: #4ade80;
+  --t-warning: #fbbf24;
+  --t-danger: #f87171;
+  --t-focus: #a5b4fc;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --color-surface: var(--t-surface);
+  --color-surface-2: var(--t-surface-2);
+  --color-surface-3: var(--t-surface-3);
+  --color-fg: var(--t-fg);
+  --color-fg-muted: var(--t-fg-muted);
+  --color-line: var(--t-line);
+  --color-accent: var(--t-accent);
+  --color-accent-fg: var(--t-accent-fg);
+  --color-success: var(--t-success);
+  --color-warning: var(--t-warning);
+  --color-danger: var(--t-danger);
+  --color-focus: var(--t-focus);
+
+  --radius-card: 12px;
+  --radius-control: 8px;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px -16px rgb(0 0 0 / 0.25);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+  body {
+    @apply bg-surface text-fg font-sans antialiased text-[14px] leading-6;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  input,
+  textarea,
+  pre,
+  code {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  :focus-visible {
+    outline: 2px solid var(--t-focus);
+    outline-offset: 2px;
+  }
+}
+
+/* Small component primitives used across views. Prefer these over ad-hoc
+   utility soup so the look stays consistent. */
+@layer components {
+  .card {
+    @apply bg-surface-2 border border-line rounded-card shadow-card;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-control border border-line bg-surface-2 text-fg text-sm font-medium cursor-pointer transition-colors;
+  }
+  .btn:hover:not(:disabled) {
+    @apply bg-surface-3;
+  }
+  .btn:disabled {
+    @apply opacity-50 cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply bg-accent text-accent-fg border-transparent;
+  }
+  .btn-primary:hover:not(:disabled) {
+    @apply brightness-110 bg-accent;
+  }
+  .btn-danger {
+    @apply text-danger border-danger/40;
+  }
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border border-line bg-surface-3 text-fg-muted;
+  }
+  .field {
+    @apply w-full px-3 py-1.5 rounded-control border border-line bg-surface text-fg;
+  }
+  .section-title {
+    @apply text-xs font-semibold uppercase tracking-wide text-fg-muted;
+  }
+}

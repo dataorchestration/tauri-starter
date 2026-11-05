@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Hardened Runtime entitlements for Developer ID distribution + notarization.
+       Keep this list minimal: every key widens what the notary service audits.
+       Screen Recording / Accessibility / Input Monitoring need NO entitlement
+       (they are TCC prompts). Uncomment only what your app actually uses. -->
+
+  <!-- Microphone (also add NSMicrophoneUsageDescription to Info.plist) -->
+  <!-- <key>com.apple.security.device.audio-input</key><true/> -->
+
+  <!-- Camera (also add NSCameraUsageDescription to Info.plist) -->
+  <!-- <key>com.apple.security.device.camera</key><true/> -->
+
+  <!-- Needed only if you ship a JIT-dependent runtime inside the bundle. -->
+  <!-- <key>com.apple.security.cs.allow-jit</key><true/> -->
+</dict>
+</plist>
