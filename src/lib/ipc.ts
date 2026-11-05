@@ -5,6 +5,7 @@
 // Errors from the core arrive as `{ code, message }` and are re-thrown as
 // `IpcError` so callers can branch on `code` without string matching.
 
+import type { DatabaseConfig } from "./config";
 import { invoke } from "@tauri-apps/api/core";
 
 export class IpcError extends Error {
@@ -49,6 +50,7 @@ export interface AppSettings {
 }
 
 export interface AppInfo {
+  database: DatabaseConfig;
   name: string;
   version: string;
   identifier: string;
@@ -149,6 +151,23 @@ export interface CrashReport {
   backtrace: string;
 }
 
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export type DistanceMetric = "cosine" | "euclidean";
+
+export interface VectorDocument {
+  collection: string;
+  id: string;
+  embedding: number[];
+  metadata?: JsonValue;
+}
+
+export interface VectorMatch {
+  id: string;
+  metadata: JsonValue;
+  /** Smaller is closer. This is distance, not a similarity score. */
+  distance: number;
+}
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 // ---------------------------------------------------------------- commands
@@ -174,6 +193,18 @@ export const api = {
   deleteNotification: (id: number) => call<boolean>("delete_notification", { id }),
   clearNotifications: () => call<number>("clear_notifications"),
   unreadCount: () => call<number>("unread_count"),
+
+  createVectorCollection: (name: string, dimensions: number) =>
+    call<void>("create_vector_collection", { name, dimensions }),
+  upsertVector: (document: VectorDocument) => call<void>("upsert_vector", { document }),
+  getVector: (collection: string, id: string) =>
+    call<VectorDocument | null>("get_vector", { collection, id }),
+  searchVectors: (collection: string, embedding: number[], limit = 10, metric: DistanceMetric = "cosine") =>
+    call<VectorMatch[]>("search_vectors", { collection, embedding, limit, metric }),
+  deleteVector: (collection: string, id: string) =>
+    call<boolean>("delete_vector", { collection, id }),
+  deleteVectorCollection: (collection: string) =>
+    call<boolean>("delete_vector_collection", { collection }),
 
   permissionReport: () => call<PermissionReport[]>("permission_report"),
   requestPermission: (permission: PermissionId) =>

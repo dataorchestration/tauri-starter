@@ -67,7 +67,7 @@ pub async fn check(app: &AppHandle) -> Result<Option<String>, UpdateError> {
 /// `verbose` (user-initiated) "up to date" and failures are announced too;
 /// the silent launch check only speaks when an update is staged.
 pub async fn check_and_notify(app: &AppHandle, verbose: bool) {
-    let locale = crate::current_locale(app);
+    let locale = crate::current_locale(app).await;
     let name = app.package_info().name.clone();
     match check(app).await {
         Ok(Some(v)) => crate::notify(

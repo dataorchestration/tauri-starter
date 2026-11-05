@@ -1,123 +1,68 @@
-//! Encrypted local store.
-//!
-//! One SQLCipher database (`app.sqlite` under the app data dir) encrypted with
-//! a random 256-bit key held in the OS keychain ([`key`]). The file is
-//! unreadable if copied off the machine or opened by another account.
-//! Migrations are plain SQL files applied in order and tracked with
-//! `PRAGMA user_version` — no extra dependency.
+//! Build-time choice of encrypted SQLCipher or native async Turso.
+//! Run `npm run configure -- --database sqlcipher|turso`; see docs/DATABASE.md.
 
 pub mod key;
+#[cfg(feature = "legacy-sqlcipher-import")]
+mod legacy;
 pub mod notifications;
 pub mod settings;
 pub mod users;
+pub mod vectors;
 
 use std::path::Path;
-use std::sync::Mutex;
 
-use rusqlite::Connection;
+#[cfg(feature = "database-turso")]
+mod turso_store;
+#[cfg(feature = "database-turso")]
+pub use turso_store::Database;
+#[cfg(feature = "database-sqlcipher")]
+mod sqlcipher_store;
+#[cfg(feature = "database-sqlcipher")]
+pub use sqlcipher_store::Database;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
+    #[cfg(feature = "database-turso")]
     #[error("database error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    #[error("database is encrypted with a different key")]
+    Turso(#[from] turso::Error),
+    #[cfg(any(feature = "database-sqlcipher", feature = "legacy-sqlcipher-import"))]
+    #[error("SQLCipher database error: {0}")]
+    Sqlcipher(rusqlite::Error),
+    #[error("database key is invalid or the encrypted file is damaged")]
     WrongKey,
     #[error("keychain error: {0}")]
     Keychain(String),
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("database file error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Validation(String),
+    #[error("unsupported schema version {0}; refusing to modify this database")]
+    SchemaVersion(i64),
+    #[error("{0}")]
+    Unsupported(&'static str),
+    #[error("database worker failed")]
+    Worker,
     #[error("not found")]
     NotFound,
 }
 
-/// Ordered migrations. Append only.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
-
-pub struct Database {
-    conn: Mutex<Connection>,
-}
-
-impl Database {
-    /// Open (creating if needed) the encrypted database at `path` with `key_hex`
-    /// (64 hex chars = 32 bytes, see [`key::generate_hex`]).
-    pub fn open(path: &Path, key_hex: &str) -> Result<Self, DbError> {
-        let conn = Connection::open(path)?;
-        Self::init(conn, Some(key_hex))
-    }
-
-    /// Unencrypted in-memory database for tests and tooling.
-    pub fn open_in_memory() -> Result<Self, DbError> {
-        Self::init(Connection::open_in_memory()?, None)
-    }
-
-    fn init(conn: Connection, key_hex: Option<&str>) -> Result<Self, DbError> {
-        if let Some(k) = key_hex {
-            // Raw-key form: SQLCipher uses the bytes as-is (no KDF), which is
-            // what we want for a random key.
-            conn.pragma_update(None, "key", format!("x'{k}'"))?;
-        }
-        // The first real read fails with NotADatabase when the key is wrong.
-        match conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
-            r.get::<_, i64>(0)
-        }) {
-            Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(e, _))
-                if e.code == rusqlite::ErrorCode::NotADatabase =>
-            {
-                return Err(DbError::WrongKey);
-            }
-            Err(e) => return Err(e.into()),
-        }
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        migrate(&conn)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
-
-    /// Run `f` with the connection. The lock is held for the closure only, so
-    /// keep transactions inside it.
-    pub fn with<T>(
-        &self,
-        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
-    ) -> Result<T, DbError> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(f(&conn)?)
-    }
-
-    /// Schema version currently applied.
-    pub fn schema_version(&self) -> Result<i64, DbError> {
-        self.with(|c| c.query_row("PRAGMA user_version", [], |r| r.get(0)))
-    }
-}
-
-/// Apply any migrations newer than `PRAGMA user_version`, each in its own
-/// transaction so a failure leaves the schema at a known version.
-fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    for (i, sql) in MIGRATIONS.iter().enumerate() {
-        let version = i as i64 + 1;
-        if version <= current {
-            continue;
-        }
-        conn.execute_batch("BEGIN")?;
-        let applied = conn
-            .execute_batch(sql)
-            .and_then(|_| conn.pragma_update(None, "user_version", version));
-        match applied {
-            Ok(()) => conn.execute_batch("COMMIT")?,
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
-            }
+#[cfg(any(feature = "database-sqlcipher", feature = "legacy-sqlcipher-import"))]
+impl From<rusqlite::Error> for DbError {
+    fn from(error: rusqlite::Error) -> Self {
+        if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::NotADatabase)
+        {
+            Self::WrongKey
+        } else {
+            Self::Sqlcipher(error)
         }
     }
-    Ok(())
 }
 
 /// True when the file on disk does NOT start with the plaintext SQLite header,
-/// i.e. it is encrypted. Used by the health check.
+/// a sanity check used after successfully opening with encryption enabled.
+/// This header check alone is not proof of encryption.
 pub fn file_is_encrypted(path: &Path) -> bool {
     use std::io::Read;
     let mut magic = [0u8; 16];
@@ -142,53 +87,85 @@ pub(crate) fn temp_db_path(tag: &str) -> std::path::PathBuf {
     dir.join("app.sqlite")
 }
 
+fn suffix_path(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    std::path::PathBuf::from(name)
+}
+
+pub(crate) fn remove_files(path: &Path) -> Result<(), DbError> {
+    for suffix in ["", "-wal", "-shm", ".tshm"] {
+        match std::fs::remove_file(suffix_path(path, suffix)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn migrations_apply_once_and_are_idempotent() {
-        let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
-        db.with(migrate).unwrap();
-        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+    #[tokio::test]
+    async fn encrypted_store_and_wal_hide_content_and_reopen() {
+        let path = temp_db_path("turso");
+        let key = key::generate_hex();
+        let db = Database::open(&path, &key).await.unwrap();
+        settings::set_raw(&db, "probe", "plaintext-marker")
+            .await
+            .unwrap();
+        for entry in std::fs::read_dir(path.parent().unwrap()).unwrap() {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            assert!(!bytes.windows(16).any(|w| w == b"plaintext-marker"));
+        }
+        db.checkpoint().await.unwrap();
+        drop(db);
+        assert!(file_is_encrypted(&path));
+        let wrong = Database::open(&path, &key::generate_hex()).await;
+        assert!(
+            matches!(wrong, Err(DbError::WrongKey)),
+            "unexpected error: {:?}",
+            wrong.err()
+        );
+        let db = Database::open(&path, &key).await.unwrap();
+        assert_eq!(
+            settings::get_raw(&db, "probe").await.unwrap().as_deref(),
+            Some("plaintext-marker")
+        );
+        drop(db);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
-    #[test]
-    fn encrypted_file_rejects_wrong_key_and_hides_plaintext() {
-        let path = temp_db_path("enc");
-        let k1 = key::generate_hex();
-        let k2 = key::generate_hex();
-        {
-            let db = Database::open(&path, &k1).unwrap();
-            db.with(|c| {
-                c.execute(
-                    "INSERT INTO settings (key, value, updated_at) VALUES ('probe', 'plaintext-marker', 1)",
-                    [],
+    #[tokio::test]
+    async fn concurrent_notifications_keep_their_own_row_ids() {
+        let db = std::sync::Arc::new(Database::open_in_memory().await.unwrap());
+        let mut tasks = Vec::new();
+        for i in 0..20 {
+            let db = db.clone();
+            tasks.push(tokio::spawn(async move {
+                notifications::insert(
+                    &db,
+                    &format!("item-{i}"),
+                    "",
+                    notifications::NotificationKind::Info,
                 )
-            })
-            .unwrap();
+                .await
+                .unwrap()
+            }));
         }
-        assert!(
-            file_is_encrypted(&path),
-            "header must not be plaintext SQLite"
-        );
-        let bytes = std::fs::read(&path).unwrap();
-        assert!(
-            !bytes.windows(16).any(|w| w == b"plaintext-marker"),
-            "row content must not appear in the file"
-        );
-        assert!(matches!(Database::open(&path, &k2), Err(DbError::WrongKey)));
-        // Reopen with the right key still works.
-        let db = Database::open(&path, &k1).unwrap();
-        let v: String = db
-            .with(|c| {
-                c.query_row("SELECT value FROM settings WHERE key='probe'", [], |r| {
-                    r.get(0)
-                })
-            })
-            .unwrap();
-        assert_eq!(v, "plaintext-marker");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let stored = {
+            let mut returned = Vec::new();
+            for task in tasks {
+                returned.push(task.await.unwrap());
+            }
+            returned
+        };
+        let all = notifications::list(&db, 100).await.unwrap();
+        assert_eq!(all.len(), 20);
+        for item in stored {
+            assert!(all.contains(&item));
+        }
     }
 }

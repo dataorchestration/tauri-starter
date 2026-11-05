@@ -6,7 +6,13 @@ import type { PermissionId } from "./ipc";
 
 export type ThemeId = "system" | "light" | "dark";
 
+export interface DatabaseConfig {
+  engine: "sqlcipher" | "turso";
+  importSqlcipher: boolean;
+}
+
 export interface StarterConfig {
+  database: DatabaseConfig;
   app: { org: string; homepage: string; supportUrl: string; docsUrl: string };
   features: {
     tray: boolean;
@@ -36,6 +42,7 @@ export interface StarterConfig {
 }
 
 const FALLBACK: StarterConfig = {
+  database: { engine: "sqlcipher", importSqlcipher: false },
   app: { org: "", homepage: "", supportUrl: "", docsUrl: "" },
   features: {
     tray: true,

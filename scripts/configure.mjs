@@ -7,6 +7,7 @@
 //     [--org "Acme Inc"] [--homepage https://acme.com] [--repo acme/notes] \
 //     [--releases-repo acme/notes-releases] [--updater-pubkey "<minisign pubkey>"] \
 //     [--icon ./brand/icon.png] [--feature tray=false --feature autostart=false] \
+//     [--database sqlcipher|turso] [--import-sqlcipher true|false]
 //     [--locales en,es] [--required-permissions screen_recording,accessibility]
 //
 // Files touched: src-tauri/tauri.conf.json, src-tauri/Cargo.toml, src-tauri/src/main.rs,
@@ -14,6 +15,7 @@
 // README.md (title only). Icons are regenerated with `tauri icon` when --icon is given.
 
 import { execSync } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,24 +23,71 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = parseArgs(process.argv.slice(2));
 
-if (args.help || !args.name) {
-  console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 15).join("\n").replaceAll("// ", ""));
-  process.exit(args.help ? 0 : 1);
+const confPath = resolve(root, "src-tauri/tauri.conf.json");
+const conf = readJson(confPath);
+const scPath = resolve(root, "starter.config.json");
+const sc = readJson(scPath);
+const savedDatabase = sc.database ?? { engine: "sqlcipher", importSqlcipher: false };
+
+if (args.help) {
+  showHelp();
+  process.exit(0);
+}
+if (process.stdin.isTTY && process.stdout.isTTY) {
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    if (!args.name && !args.database) {
+      args.name = (await prompt.question(`App name [${conf.productName}]: `)).trim() || conf.productName;
+      args.identifier = (await prompt.question(`Bundle identifier [${conf.identifier}]: `)).trim() || conf.identifier;
+    }
+    if (!args.database) {
+      console.log("\nDatabase choice:\n  1. SQLCipher — established encrypted storage (default)\n  2. Turso — native async + exact vector search; experimental encryption");
+      const answer = (await prompt.question(`Choose 1 or 2 [${savedDatabase.engine === "turso" ? "2" : "1"}]: `)).trim();
+      args.database = answer === "1" ? "sqlcipher" : answer === "2" ? "turso" : answer || savedDatabase.engine;
+    }
+    if (args.database === "turso" && args["import-sqlcipher"] === undefined) {
+      const defaultImport = savedDatabase.engine === "turso" && savedDatabase.importSqlcipher;
+      const answer = (await prompt.question(`Import an existing SQLCipher install? Adds SQLCipher dependencies [${defaultImport ? "Y/n" : "y/N"}]: `)).trim().toLowerCase();
+      if (!["", "y", "yes", "n", "no"].includes(answer)) die("answer yes or no for SQLCipher import");
+      args["import-sqlcipher"] = answer === "" ? defaultImport : ["y", "yes"].includes(answer);
+    }
+  } finally { prompt.close(); }
+}
+if (!args.name && !args.database && args["import-sqlcipher"] === undefined) {
+  showHelp();
+  process.exit(1);
+}
+const engine = args.database ?? savedDatabase.engine;
+if (!["sqlcipher", "turso"].includes(engine)) die("--database must be sqlcipher or turso");
+const importArg = args["import-sqlcipher"];
+if (importArg !== undefined && ![true, false, "true", "false"].includes(importArg)) die("--import-sqlcipher must be true or false");
+const importSqlcipher = importArg === undefined
+  ? (engine === "turso" && savedDatabase.engine === "turso" && savedDatabase.importSqlcipher)
+  : importArg === true || importArg === "true";
+if (importSqlcipher && engine !== "turso") die("--import-sqlcipher requires --database turso");
+sc.database = { ...sc.database, engine, importSqlcipher: Boolean(importSqlcipher) };
+// Validate choices before rewriting any files.
+for (const f of toList(args.feature)) {
+  const [k] = f.split("=");
+  if (!(k in sc.features)) die(`unknown feature "${k}" (have: ${Object.keys(sc.features).join(", ")})`);
 }
 
-const name = String(args.name).trim();
-const slug = toSlug(name); // package.json name, keychain items, updater key file
-const crate = slug; // Cargo package name (kebab)
-const crateLib = `${slug.replaceAll("-", "_")}_lib`;
+const name = String(args.name ?? conf.productName).trim();
+const slug = args.name ? toSlug(name) : readJson(resolve(root, "package.json")).name; // package.json name, keychain items, updater key file
+const originalCargo = readFileSync(resolve(root, "src-tauri/Cargo.toml"), "utf8");
+const oldCrate = originalCargo.match(/^name = "([^"]+)"/m)[1];
+const oldLib = originalCargo.match(/^name = "([^"]+_lib)"/m)[1];
+const crate = args.name ? slug : oldCrate;
+const crateLib = args.name ? `${slug.replaceAll("-", "_")}_lib` : oldLib;
 const identifier = args.identifier ? String(args.identifier) : null;
 
 // ---------------------------------------------------------------- tauri.conf.json
-const confPath = resolve(root, "src-tauri/tauri.conf.json");
-const conf = readJson(confPath);
 const previousName = conf.productName;
-conf.productName = name;
+if (args.name) {
+  conf.productName = name;
+  conf.app.windows[0].title = name;
+}
 if (identifier) conf.identifier = identifier;
-conf.app.windows[0].title = name;
 if (args["releases-repo"]) {
   conf.plugins ??= {};
   conf.plugins.updater ??= {};
@@ -54,13 +103,16 @@ writeJson(confPath, conf);
 
 // ---------------------------------------------------------------- Cargo.toml + main.rs
 const cargoPath = resolve(root, "src-tauri/Cargo.toml");
-let cargo = readFileSync(cargoPath, "utf8");
-const oldCrate = cargo.match(/^name = "([^"]+)"/m)[1];
-const oldLib = cargo.match(/^name = "([^"]+_lib)"/m)[1];
+let cargo = originalCargo;
 cargo = cargo.replace(/^name = "[^"]+"/m, `name = "${crate}"`);
 cargo = cargo.replace(/^name = "[^"]+_lib"/m, `name = "${crateLib}"`);
-cargo = cargo.replace(/^description = "[^"]*"/m, `description = "${name}"`);
+if (args.name) cargo = cargo.replace(/^description = "[^"]*"/m, `description = "${name}"`);
 if (args.org) cargo = cargo.replace(/^authors = \[[^\]]*\]/m, `authors = ["${args.org}"]`);
+const defaultFeatures = JSON.parse(cargo.match(/^default = (\[[^\n]*\])/m)[1])
+  .filter((feature) => !["database-sqlcipher", "database-turso", "legacy-sqlcipher-import"].includes(feature));
+defaultFeatures.push(`database-${engine}`);
+if (importSqlcipher) defaultFeatures.push("legacy-sqlcipher-import");
+cargo = cargo.replace(/^default = \[[^\n]*\]/m, `default = ${JSON.stringify(defaultFeatures)}`);
 writeFileSync(cargoPath, cargo);
 replaceInFile(resolve(root, "src-tauri/src/main.rs"), `${oldLib}::run()`, `${crateLib}::run()`);
 
@@ -69,11 +121,9 @@ const pkgPath = resolve(root, "package.json");
 const pkg = readJson(pkgPath);
 pkg.name = slug;
 writeJson(pkgPath, pkg);
-replaceInFile(resolve(root, "index.html"), /<title>.*<\/title>/, `<title>${escapeHtml(name)}</title>`);
+if (args.name) replaceInFile(resolve(root, "index.html"), /<title>.*<\/title>/, `<title>${escapeHtml(name)}</title>`);
 
 // ---------------------------------------------------------------- starter.config.json
-const scPath = resolve(root, "starter.config.json");
-const sc = readJson(scPath);
 if (args.org) sc.app.org = String(args.org);
 if (args.homepage) sc.app.homepage = String(args.homepage);
 if (args.repo) {
@@ -102,7 +152,7 @@ if (existsSync(relPath) && args["releases-repo"]) {
 }
 
 // ---------------------------------------------------------------- README title
-replaceInFile(resolve(root, "README.md"), new RegExp(`^# ${escapeRegex(previousName)}`, "m"), `# ${name}`);
+if (args.name) replaceInFile(resolve(root, "README.md"), new RegExp(`^# ${escapeRegex(previousName)}`, "m"), `# ${name}`);
 
 // ---------------------------------------------------------------- icons
 if (args.icon) {
@@ -116,6 +166,7 @@ console.log(`
 ✓ Configured "${name}"
   identifier      ${conf.identifier}
   package / crate ${slug} (lib ${crateLib}, was ${oldCrate})
+  database        ${engine} (vectors: ${engine === "turso" ? "enabled" : "unavailable"}, SQLCipher import: ${importSqlcipher ? "enabled" : "disabled"})
   updater         ${sc.features.updater ? "enabled" : "disabled"}${conf.plugins?.updater?.endpoints ? ` → ${conf.plugins.updater.endpoints[0]}` : ""}
   features        ${Object.entries(sc.features).map(([k, v]) => `${k}=${v}`).join(" ")}
 
@@ -124,6 +175,24 @@ Release setup: docs/RELEASING.md
 `);
 
 // ---------------------------------------------------------------- helpers
+function showHelp() {
+  console.log(`Configure the template (run without arguments in a terminal for prompts).
+
+npm run configure -- --name "Acme Notes" --identifier com.acme.notes
+  --database sqlcipher|turso         SQLCipher is the default; Turso enables vectors
+  --import-sqlcipher true|false      Turso only; false for new projects
+  --org "Acme Inc" --homepage https://acme.com --repo acme/notes
+  --releases-repo acme/notes-releases --updater-pubkey "<public key>"
+  --icon ./brand/icon.png --feature tray=false --feature autostart=false
+  --locales en,es --required-permissions screen_recording,accessibility
+
+Database-only selection preserves the app identity:
+  npm run configure -- --database turso
+
+Non-interactive calls keep the saved database choice unless specified.
+Database formats differ. See docs/DATABASE.md before changing an existing app.`);
+}
+
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
@@ -159,6 +228,7 @@ function readJson(p) {
   return JSON.parse(readFileSync(p, "utf8"));
 }
 function writeJson(p, v) {
+  if (JSON.stringify(readJson(p)) === JSON.stringify(v)) return;
   writeFileSync(p, JSON.stringify(v, null, 2) + "\n");
 }
 function replaceInFile(p, from, to) {

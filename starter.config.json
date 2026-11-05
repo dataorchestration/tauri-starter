@@ -6,6 +6,11 @@
     "supportUrl": "https://github.com/OWNER/REPO/issues",
     "docsUrl": "https://github.com/OWNER/REPO#readme"
   },
+  "database": {
+    "$comment": "Select with npm run configure -- --database sqlcipher|turso. Cargo defaults are generated from this choice. Import is a separate opt-in for existing SQLCipher installs.",
+    "engine": "sqlcipher",
+    "importSqlcipher": false
+  },
   "features": {
     "tray": true,
     "singleInstance": true,
@@ -17,20 +22,36 @@
   "permissions": {
     "$comment": "Permissions the health check reports. `required` ones block onboarding until granted; `optional` ones are shown but never block. Values: notifications, accessibility, screen_recording, microphone, camera, input_monitoring.",
     "required": [],
-    "optional": ["notifications"]
+    "optional": [
+      "notifications"
+    ]
   },
   "telemetry": {
     "$comment": "Telemetry is OPT-IN: nothing is sent until the user enables it in Settings. Sinks with empty endpoints/DSNs are skipped. The file sink always writes local logs.",
     "defaultEnabled": false,
     "sinks": {
-      "file": { "enabled": true, "maxFiles": 7 },
-      "sentry": { "dsn": "" },
-      "http": { "endpoint": "", "apiKeyHeader": "x-api-key", "apiKey": "", "batchSize": 20, "flushIntervalSecs": 5 }
+      "file": {
+        "enabled": true,
+        "maxFiles": 7
+      },
+      "sentry": {
+        "dsn": ""
+      },
+      "http": {
+        "endpoint": "",
+        "apiKeyHeader": "x-api-key",
+        "apiKey": "",
+        "batchSize": 20,
+        "flushIntervalSecs": 5
+      }
     }
   },
   "i18n": {
     "default": "en",
-    "supported": ["en", "es"]
+    "supported": [
+      "en",
+      "es"
+    ]
   },
   "ui": {
     "defaultTheme": "system"

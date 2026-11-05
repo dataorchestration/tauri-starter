@@ -45,10 +45,13 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY) {
   Write-Host "→ updater artifacts: not signed (fine if the updater is disabled)"
 }
 
-# openssl-src (SQLCipher) needs perl + nasm on MSVC.
-foreach ($tool in @("perl", "nasm")) {
-  if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-    Write-Warning "$tool not found on PATH — building the vendored OpenSSL for SQLCipher will fail. winget install StrawberryPerl.StrawberryPerl NASM.NASM"
+# Only SQLCipher builds (or Turso legacy imports) use vendored OpenSSL.
+$starter = Get-Content starter.config.json -Raw | ConvertFrom-Json
+if ($starter.database.engine -eq "sqlcipher" -or $starter.database.importSqlcipher) {
+  foreach ($tool in @("perl", "nasm")) {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+      Write-Warning "$tool not found on PATH — building the vendored OpenSSL for SQLCipher will fail. winget install StrawberryPerl.StrawberryPerl NASM.NASM"
+    }
   }
 }
 
