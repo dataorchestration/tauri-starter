@@ -16,7 +16,9 @@ menus and updates; the webview renders and calls typed commands (`src/lib/ipc.ts
 - Frontend: `npm run test` and `npm run build`
 - Rust (in `src-tauri/`): `cargo test`, `cargo clippy --all-targets -- -D warnings`,
   `cargo fmt --all --check`
-- Integration: `npm run tauri build -- --bundles app`
+- Integration: `npm run tauri build -- --bundles app` — run locally. CI does NOT
+  build bundles (Actions budget); `.github/workflows/build.yml` is the manual
+  (workflow_dispatch) equivalent. Don't add bundle builds back to `ci.yml`.
 - `npm run check` runs everything except the integration build.
 
 ## Conventions
