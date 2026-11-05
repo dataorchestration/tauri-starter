@@ -6,8 +6,8 @@ configurable from one file — so you start on your product, not on plumbing.
 
 | Included | Where |
 | --- | --- |
-| **Encrypted local database** — async Turso (MIT), key in the OS keychain, SQL migrations, CRUD for users / settings / notifications | `src-tauri/src/db/` |
-| **Vector storage + search** — named embedding collections, validated float32 vectors, exact cosine / Euclidean search, typed IPC | `src-tauri/src/db/vectors.rs`, `docs/DATABASE.md` |
+| **Database choice** — SQLCipher (default) or native async Turso (MIT); encrypted storage, OS keychain, migrations, CRUD | `src-tauri/src/db/` |
+| **Optional vector storage + search** — Turso collections, validated float32 embeddings, exact cosine / Euclidean search, typed IPC | `src-tauri/src/db/vectors.rs`, `docs/DATABASE.md` |
 | **Logging & telemetry** — `tracing` → rolling file log + swappable remote sinks (Sentry, generic HTTPS ingest). Opt-in, anonymous, no content | `src-tauri/src/telemetry/`, `docs/TELEMETRY.md` |
 | **Crash reports** — panic hook writes a report; next launch offers send/dismiss. Frontend errors routed too | `src-tauri/src/crash.rs`, `src/lib/log.ts` |
 | **Auto-updater** — signed feed on GitHub Releases, launch-time + manual check, "Restart to update" | `src-tauri/src/updater.rs`, `docs/RELEASING.md` |
@@ -28,20 +28,45 @@ npm run tauri dev
 
 Prerequisites: Node 22+, Rust stable, and the [Tauri system deps](https://tauri.app/start/prerequisites/)
 for your OS. The current locked frontend dependencies need Node 22.22.2+ within the 22.x line.
-Windows additionally needs `perl` + `nasm` (for the legacy SQLCipher importer's vendored OpenSSL):
+Windows SQLCipher builds (and Turso builds with legacy import) additionally need
+`perl` + `nasm` for vendored OpenSSL:
 `winget install StrawberryPerl.StrawberryPerl NASM.NASM`.
+Fresh Turso builds exclude SQLCipher and these OpenSSL build requirements.
 
-Turso **0.8.3** is pinned. Its encryption support is still **experimental upstream**;
-review that maturity before shipping a production app. Existing stock SQLCipher
-installs are imported into a separate encrypted file, retaining the original.
-Vector search is **exact**, with no ANN index or cloud service. See
-[Database guide](docs/DATABASE.md) for migration, async behavior, limits, and examples.
+## Choose your database
+
+After **Use this template**, run `npm run configure` in a terminal. Setup prompts
+for the app identity and database choice. Or select explicitly:
+
+```sh
+# Default: encrypted SQLCipher, no vector API
+npm run configure -- --database sqlcipher
+
+# Native async Turso + exact vector search, no SQLCipher dependency
+npm run configure -- --database turso --import-sqlcipher false
+
+# Upgrade an existing stock SQLCipher install to Turso
+npm run configure -- --database turso --import-sqlcipher true
+```
+
+| Pick | Includes | Consideration |
+| --- | --- | --- |
+| SQLCipher (default) | Encrypted CRUD for users, settings, notifications | Synchronous engine runs on blocking workers; vectors unavailable |
+| Turso | Native async/await, encrypted CRUD, exact vector search | Pinned 0.8.3; encryption is experimental upstream; no ANN index |
+| Turso + SQLCipher import | Turso plus one-time encrypted legacy import | Retains SQLCipher dependency and the original data snapshot |
+
+Setup saves the choice in `starter.config.json` and generates Cargo defaults.
+A build guard rejects mismatches. Only the selected engine (plus an explicitly
+selected importer) is compiled. Database-only commands preserve the app identity.
+This is a **project setup choice**, not an end-user runtime switch.
+See [Database guide](docs/DATABASE.md) before changing an existing app.
 
 ## Make it yours
 
 ```sh
 npm run configure -- --name "Acme Notes" --identifier com.acme.notes \
   --org "Acme Inc" --homepage https://acme.com --repo acme/notes \
+  --database sqlcipher \
   --releases-repo acme/notes-releases --icon ./brand/icon.png
 ```
 
@@ -53,6 +78,7 @@ Feature toggles live in **`starter.config.json`** (read by both Rust and the
 webview at build time):
 
 ```jsonc
+"database":    { "engine": "sqlcipher", "importSqlcipher": false },
 "features":    { "tray": true, "singleInstance": true, "windowState": true,
                  "autostart": true, "updater": false, "notifications": true },
 "permissions": { "required": [], "optional": ["notifications"] },
@@ -79,7 +105,7 @@ src-tauri/
   src/lib.rs             startup sequence, plugin wiring
   src/commands.rs        the IPC surface
   src/config.rs          starter.config.json → typed struct
-  src/db/                async encrypted Turso + SQLCipher import + vectors + CRUD
+  src/db/                selected engine + shared models/tests + optional vectors/import
   src/telemetry/         Sink trait, tracing layer, sentry/http sinks
   src/crash.rs           panic hook + pending reports
   src/permissions.rs     per-platform permission status/request/settings links
@@ -105,8 +131,8 @@ npm run tauri build -- --bundles app
 
 - **New backend command** → add `#[tauri::command]` in `commands.rs`, register in
   `lib.rs`, add the typed entry in `src/lib/ipc.ts`.
-- **New table** → `src-tauri/src/db/migrations/0003_*.sql`, list it in `db/mod.rs`,
-  add a CRUD module like `users.rs`.
+- **New table** → `src-tauri/src/db/migrations/0003_*.sql`, list it in the relevant
+  backend store module, and add shared models plus backend CRUD like `users.rs`.
 - **New telemetry backend** → implement `telemetry::Sink`, construct it in `telemetry::init`.
 - **New language** → `src/i18n/locales/<code>.json`, import in `src/i18n/index.ts`
   and `src-tauri/src/i18n.rs`, add to `starter.config.json`. A test fails if any key is missing.

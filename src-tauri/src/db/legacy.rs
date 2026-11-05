@@ -1,7 +1,7 @@
 //! One-time, read-only SQLCipher import. Plaintext exists only in memory.
-use super::{Database, DbError, key};
+use super::{Database, DbError, key, remove_files, suffix_path};
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const TABLES: &[(&str, &str, &str)] = &[
     (
@@ -128,23 +128,6 @@ pub(super) async fn import(destination: &Path, source: &Path, key: &str) -> Resu
     Ok(())
 }
 
-fn suffix_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(suffix);
-    PathBuf::from(name)
-}
-
-pub(crate) fn remove_files(path: &Path) -> Result<(), DbError> {
-    for suffix in ["", "-wal", "-shm", ".tshm"] {
-        match std::fs::remove_file(suffix_path(path, suffix)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::{notifications, settings, users};
@@ -237,7 +220,7 @@ mod tests {
             )
             .unwrap();
         let source_bytes = std::fs::read(&source).unwrap();
-        let wal_path = suffix_path(&source, "-wal");
+        let wal_path = super::super::suffix_path(&source, "-wal");
         let wal_bytes = std::fs::read(&wal_path).unwrap();
         assert!(!wal_bytes.is_empty());
         let db = Database::open_or_import(&target, &source, &key)

@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -25,10 +26,10 @@ serde_json = "1"
 thiserror = "2"
 # Native async embedded store. Pin the pre-1.0 engine; encryption is experimental
 # upstream. No cloud account, network client, FTS, or global allocator required.
-turso = { version = "=0.8.3", default-features = false, features = ["pure-rust-crypto"] }
+turso = { version = "=0.8.3", default-features = false, features = ["pure-rust-crypto"], optional = true }
 tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
-# Used ONLY to import existing SQLCipher installs without a plaintext export.
-rusqlite = { version = "0.41", features = ["bundled-sqlcipher-vendored-openssl"] }
+# SQLCipher backend or explicit legacy import for Turso builds.
+rusqlite = { version = "0.41", features = ["bundled-sqlcipher-vendored-openssl"], optional = true }
 keyring = "4"
 getrandom = "0.4"
 # Structured logging: `tracing` facade, file appender, plus our own telemetry
@@ -60,7 +61,11 @@ objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice", "AVMedia
 block2 = "0.6"
 
 [features]
-default = ["telemetry-http", "telemetry-sentry"]
+# Generated database selection: use npm run configure -- --database ...
+default = ["telemetry-http", "telemetry-sentry", "database-sqlcipher"]
+database-sqlcipher = ["dep:rusqlite"]
+database-turso = ["dep:turso"]
+legacy-sqlcipher-import = ["database-turso", "dep:rusqlite"]
 # Batched HTTPS event sink (point it at your own ingest endpoint / worker).
 telemetry-http = ["dep:reqwest"]
 # Sentry error + crash reporting.

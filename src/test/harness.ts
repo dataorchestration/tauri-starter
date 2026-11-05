@@ -16,6 +16,7 @@ export function emit(event: string, payload: unknown) {
 }
 
 export const appInfo: AppInfo = {
+  database: { engine: "sqlcipher", importSqlcipher: false },
   name: "Hello Desktop",
   version: "0.1.0",
   identifier: "com.example.hellodesktop",

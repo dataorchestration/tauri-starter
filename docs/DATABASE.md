@@ -1,59 +1,97 @@
-# Local Turso database
+# Choosing local storage
 
-The application uses the **Turso Rust engine**, pinned to `turso = 0.8.3`,
-under the [MIT license](https://github.com/tursodatabase/turso/blob/main/LICENSE.md).
-It is an embedded database: no Turso account, URL, token, server, or network
-connection is needed. This is the `turso` crate, distinct from `libsql`.
+The template defaults to encrypted **SQLCipher**. **Turso** is optional, and its
+SQLCipher importer is a separate opt-in. Select once while configuring a derived
+project; this is not an end-user switch in Settings.
 
-## Async execution and maturity
+```sh
+npm run configure                         # interactive identity + database prompts
+npm run configure -- --database sqlcipher
+npm run configure -- --database turso --import-sqlcipher false
+npm run configure -- --database turso --import-sqlcipher true
+```
 
-Opening, executing, querying, and reading rows use native Rust async/await.
-Database commands run on Tauri's async runtime. Async locks protect the store
-lifecycle and a single shared connection; they do not block a thread while
-waiting for another operation. Operations are serialized, not concurrent writers.
-The synchronous Tauri `setup` hook bridges once with `block_on` before commands
-are accepted. The legacy importer alone uses a blocking worker for SQLCipher.
+Non-interactive identity changes preserve the saved selection. Choosing SQLCipher
+clears the import option unless an explicit, invalid import request was supplied.
+Invalid choices are rejected before setup rewrites project files.
 
-Async APIs do not make a full vector scan free of CPU cost or guarantee kernel
-async I/O on every OS. Turso advertises `io_uring` on Linux; macOS/Windows use
-its platform backend. Benchmark the actual dataset and target devices.
+| Selection | Cargo feature | Database file | Vectors | SQLCipher dependency |
+| --- | --- | --- | --- | --- |
+| SQLCipher | `database-sqlcipher` | `app.sqlite` | Unavailable | Yes |
+| Turso | `database-turso` | `app.turso.sqlite` | Exact cosine / Euclidean | No |
+| Turso with import | `database-turso`, `legacy-sqlcipher-import` | `app.turso.sqlite` | Same | Only for import |
 
-Turso remains pre-1.0, and **encryption is explicitly experimental upstream**.
-The starter enables its AEGIS-256 page encryption with a random 256-bit key from
-the existing OS keychain entry. It never falls back to an unencrypted file.
-Tests exercise encrypted persistence, absence of a plaintext marker in the main
-file/WAL, and rejection of a different key. These tests are not a security audit.
-The health check's header test is a sanity check, not proof of encryption.
+`starter.config.json` records `database.engine` and `database.importSqlcipher`.
+Configure generates matching default Cargo features and preserves unrelated
+features such as telemetry. `build.rs` rejects no-engine, both-engine, and
+config/feature mismatches; use configure rather than editing just Cargo features.
+The Rust and TypeScript config mirrors and `app_info.database` expose the choice.
+
+Turso's Rust engine is pinned to **0.8.3**, under the
+[MIT license](https://github.com/tursodatabase/turso/blob/main/LICENSE.md).
+Neither backend requires a database server, cloud account, URL, or token.
+The `turso` crate is distinct from `libsql`.
+
+## Async execution and encryption
+
+Both selections expose the same async CRUD/IPC API. SQLCipher is a synchronous
+engine: operations run on blocking workers. An owned async lock stays inside the
+worker, so cancellation of its caller cannot let reset delete an in-use file.
+Turso uses native async/await for opening, executing, querying, and reading rows.
+It uses an async connection mutex. Both backends intentionally serialize DB
+operations; neither configuration promises parallel searches or concurrent writers.
+
+The synchronous Tauri setup hook bridges once with `block_on` before commands
+are accepted. OS keychain/file calls still use synchronous APIs. Async queries
+are not free of CPU cost; Turso advertises `io_uring` on Linux, with platform
+backends on macOS/Windows. Benchmark actual data and target devices.
+
+Both stores use a random 256-bit key from the OS keychain. SQLCipher uses its
+existing raw-key encryption; Turso uses AEGIS-256 page encryption. Turso remains
+pre-1.0 and **its encryption is explicitly experimental upstream**. There is no
+plaintext-file fallback. Tests exercise encrypted persistence, wrong-key
+rejection, and absence of a plaintext marker in the main file/WAL. Tests are not
+a security audit; the health check's header check is only a sanity check.
 
 Sources: [Rust API](https://docs.rs/crate/turso/0.8.3),
 [Turso features and roadmap](https://github.com/tursodatabase/turso#features-and-roadmap).
 
-## Upgrading existing installs
+## Existing data and migration
 
-- Fresh installs create `app.turso.sqlite` in the app data directory.
-- When only `app.sqlite` exists, startup opens it read-only using SQLCipher and
-  the existing key, snapshots the stock v1 users/settings/notifications and
-  notification sequence, and imports them into an encrypted staging database.
+- Selecting a backend changes the build; configure does not open or convert any
+  user's database. Import happens when the configured application starts.
+- A Turso build without import support refuses startup when only `app.sqlite`
+  exists. It does not silently create an empty replacement. Reconfigure with
+  `--database turso --import-sqlcipher true` to enable the importer.
+- The importer opens SQLCipher read-only using the existing key, snapshots stock
+  v1 users/settings/notifications and their sequence (including committed WAL
+  data), then copies them transactionally into an encrypted staging database.
   IDs, nullable fields, JSON settings/device ID, read flags, and timestamps survive.
-- Import runs in a transaction. After a successful checkpoint and file sync,
-  the staging file is renamed to `app.turso.sqlite`. A crash before publication
-  leaves no accepted new database; startup discards that staging file and retries.
-- The original SQLCipher file is retained. It is not kept in sync after import.
-  Do not run old and new app versions against the same data directory at once.
-  Reverting to the old app uses the old snapshot and omits subsequent changes.
-- Wrong keys, unsupported schema versions, any deviation from the shipped v1 schema
-  (including custom indexes or constraints) stop the import. Starter-derived applications must extend the importer
-  for their schema. No plaintext export is written.
-- `rusqlite`/SQLCipher remain **only for import**. Consequently Windows still
-  needs Perl/NASM for its vendored OpenSSL build. Ordinary CRUD uses Turso.
-- “Erase all data” drains active DB commands, closes the engine, removes Turso,
-  staging, and retained SQLCipher files and sidecars, then rotates the key. If
-  reset fails, commands fail closed; retry erase or restart after fixing the error.
+- Only after checkpointing and file sync is staging renamed to the new store.
+  Interrupted staging is discarded and retried on the next launch. The original
+  encrypted SQLCipher files remain as a recovery snapshot, with no plaintext export.
+- Wrong keys, unsupported versions, or any deviation from the shipped v1 schema
+  stop import. Extend the importer for a starter-derived application's schema.
+- SQLCipher builds refuse startup if a Turso database already exists: reopening
+  the old SQLCipher snapshot would silently hide changes made after migration.
+  Reverse migration is not implemented. Do not run both builds on one data directory.
+- Successful migration does not keep the retained SQLCipher snapshot in sync.
+  Keep it and the key available for recovery. Import support may be removed from
+  later builds once all supported installs have migrated.
+- “Erase all data” drains operations (including cancelled SQLCipher callers'
+  workers), closes the engine, removes both stores and staging/sidecar files, and
+  rotates the key. Errors leave the store unavailable until retry or recovery.
 
-Do not point Turso directly at a SQLCipher-encrypted file: the encryption formats
-are different. Keep the database and its key available for recovery.
+Turso cannot directly open SQLCipher encryption. SQLCipher/OpenSSL are compiled
+only for the SQLCipher selection or explicit legacy import; those Windows builds
+still require Perl/NASM. A fresh Turso project excludes that dependency.
 
 ## Vector API
+
+This API is available only with `--database turso`. SQLCipher builds retain the
+same command names and return `feature_unavailable`; they do not emulate vector
+search or load a vector extension. Inspect `(await api.appInfo()).database.engine`
+or `config.database.engine` before showing vector functionality.
 
 Embeddings stay inside the same encrypted database. The application supplies
 embeddings from its own model; the starter neither generates them nor uploads
@@ -105,9 +143,13 @@ indexing strategy before release.
 ## Extending and testing
 
 Append migrations (`0003_*.sql` onward); never edit shipped migration 0001.
-Migration version changes occur in the same transaction as their schema changes.
+Each backend has its own migration list (`sqlcipher_store.rs`, `turso_store.rs`).
+Extend the importer when adding application-specific schemas. Migration version
+changes occur in the same transaction as their schema changes.
 A future schema version is rejected, and a failed migration is rolled back.
 
 Use `#[tokio::test]` with `Database::open_in_memory().await` for logic, plus
 file-backed encrypted tests for persistence. Run `npm run check` and
-`npm run tauri build -- --bundles app`; CI checks macOS, Windows, and Linux.
+`npm run tauri build -- --bundles app`; CI checks the default and both Turso selections on macOS, Windows, and Linux,
+without bundle builds. Local bundle builds or the manual Build app workflow
+remain the integration gate.

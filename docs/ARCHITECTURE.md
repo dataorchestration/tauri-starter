@@ -9,7 +9,7 @@
                                                        ▼
 ┌──────────────── Rust core (src-tauri) ────────────────────────┐
 │ commands.rs  (thin IPC surface; IpcError { code, message })    │
-│   ├─ db/        async Turso · key.rs (OS keychain) · CRUD/vectors  │
+│   ├─ db/        selected DB · key.rs (OS keychain) · CRUD/vectors  │
 │   ├─ telemetry/ tracing → file log · Sink trait → sentry/http │
 │   ├─ crash.rs   panic hook → crashes/*.json → send/dismiss     │
 │   ├─ permissions.rs / health.rs                                │
@@ -25,7 +25,7 @@
 1. Plugins. `single-instance` must be first. Desktop-only plugins are gated by
    `#[cfg(desktop)]` and by `features.*` in `starter.config.json`.
 2. `setup`: resolve `AppPaths` → load/create the DB key from the keychain →
-   open/import the encrypted Turso DB (runs migrations) → load settings.
+   open the selected encrypted DB (or import into Turso) (runs migrations) → load settings.
    Tauri setup uses one `block_on` bridge before accepting commands.
 3. Telemetry **before** the crash hook, so Sentry's panic integration is the
    "previous hook" ours chains to.
@@ -39,13 +39,16 @@
   write guard, drains in-flight operations, closes the engine, removes both
   stores, rotates the key, and opens a fresh store. On failure the state stays
   unavailable (`None`), never an accidentally writable in-memory fallback.
-- `Database` owns a Turso engine and an async `Mutex<Connection>`. This
-  deliberately serializes operations, including notification insert/row-ID
-  retrieval and vector collection dimension checks. It does not claim concurrent
-  writers or parallel searches. Transactions roll back on drop.
-- Database methods and their IPC commands use native async/await. Only the
-  one-time SQLCipher snapshot uses `spawn_blocking`; ordinary Turso queries do
-  not. OS keychain/file operations still use their synchronous APIs.
+- `Database` is selected at compile time: `sqlcipher_store.rs` (default) or
+  `turso_store.rs`. Shared wire models/tests live in users/settings/notifications;
+  backend SQL implementations live in their respective subdirectories.
+- SQLCipher operations use `spawn_blocking` with an owned async connection guard.
+  A cancelled command's worker retains the guard until completion; close/reset
+  waits for it. Turso executes queries with native async/await. Both serialize
+  access; neither promises concurrent writers. Transactions roll back on drop.
+- Vector commands keep stable wire names: Turso implements them, while SQLCipher
+  returns `feature_unavailable`. Frontend callers can inspect `app_info.database`.
+  OS keychain/file calls remain synchronous.
 - Telemetry runs one worker thread (`std::sync::mpsc`), batching by count and
   interval. Sinks are called from that thread only.
 
@@ -54,7 +57,7 @@
 | Path (macOS example) | What |
 | --- | --- |
 | `~/Library/Application Support/<App>/app.turso.sqlite` | encrypted Turso DB (+ `-wal`) |
-| `~/Library/Application Support/<App>/app.sqlite` | retained legacy SQLCipher DB after import |
+| `~/Library/Application Support/<App>/app.sqlite` | active SQLCipher DB, or retained snapshot after Turso import |
 | `~/Library/Application Support/<App>/crashes/*.json` | pending crash reports |
 | `~/Library/Logs/<App>/app.YYYY-MM-DD.log` | rolling logs (7 by default) |
 | macOS Keychain, service = bundle identifier, account `db-key` | 32-byte DB key (hex) |
@@ -66,7 +69,7 @@ Windows: `%APPDATA%\<identifier>`, Credential Manager. Linux: `~/.local/share/<i
 - Rust structs use `snake_case` fields; TS mirrors in `src/lib/ipc.ts` match.
   Enums are `#[serde(rename_all = "snake_case")]`.
 - Errors: `IpcError { code: &'static str, message }`. Stable codes: `not_found`,
-  `db`, `db_wrong_key`, `keychain`, `validation`, `updater_not_configured`,
+  `db`, `db_wrong_key`, `keychain`, `validation`, `feature_unavailable`, `updater_not_configured`,
   `updater_failed`, `autostart`, `opener`, `telemetry`, `forbidden`, `tauri`.
 - Events (core → UI): `starter://navigate {view}`, `starter://update-ready "x.y.z"`,
   `starter://locale-changed "es"`, `starter://notification {Notification}`.
@@ -80,7 +83,7 @@ Windows: `%APPDATA%\<identifier>`, Credential Manager. Linux: `~/.local/share/<i
 4. Test the pure logic in the module it calls; UI tests mock `invoke` via `src/test/harness.ts`.
 
 **A table** — `db/migrations/0003_<name>.sql`, append to `MIGRATIONS` in
-`db/mod.rs`, add `db/<name>.rs` with functions taking `&Database` (see
+the selected backend store module, add `db/<name>.rs` with functions taking `&Database` (see
 `users.rs`), unit-test with `Database::open_in_memory().await`.
 
 **A setting** — add the field to `AppSettings` (`db/settings.rs`, with a default)
@@ -104,7 +107,8 @@ capability in `src-tauri/capabilities/`, and give it its own HTML entry in
 ## Security posture
 
 - The DB key is held in the OS keychain, not written to an application file.
-  Turso uses AEGIS-256 authenticated page encryption (experimental upstream).
+  SQLCipher is the default; optional Turso uses AEGIS-256 authenticated page
+  encryption (experimental upstream).
   See [DATABASE.md](DATABASE.md) for migration and encryption limits.
 - The webview gets only what commands return. Nothing in `src/` reads files or
   secrets directly.

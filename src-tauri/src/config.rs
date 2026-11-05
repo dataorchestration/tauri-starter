@@ -17,11 +17,27 @@ const RAW: &str = include_str!("../../starter.config.json");
 #[serde(default, rename_all = "camelCase")]
 pub struct StarterConfig {
     pub app: AppMeta,
+    pub database: DatabaseCfg,
     pub features: Features,
     pub permissions: PermissionsCfg,
     pub telemetry: TelemetryCfg,
     pub i18n: I18nCfg,
     pub ui: UiCfg,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseEngine {
+    #[default]
+    Sqlcipher,
+    Turso,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DatabaseCfg {
+    pub engine: DatabaseEngine,
+    pub import_sqlcipher: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -159,16 +175,11 @@ pub fn parse(raw: &str) -> Result<StarterConfig, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
-/// The embedded config, parsed once. A malformed file falls back to defaults
-/// (and says so on stderr) rather than refusing to start.
+/// The embedded config, parsed once. Refuse malformed configuration rather
+/// than reporting a default backend that disagrees with the compiled features.
 pub fn get() -> &'static StarterConfig {
     static CFG: OnceLock<StarterConfig> = OnceLock::new();
-    CFG.get_or_init(|| {
-        parse(RAW).unwrap_or_else(|e| {
-            eprintln!("starter.config.json is invalid ({e}); using defaults");
-            StarterConfig::default()
-        })
-    })
+    CFG.get_or_init(|| parse(RAW).expect("starter.config.json must match the typed configuration"))
 }
 
 #[cfg(test)]

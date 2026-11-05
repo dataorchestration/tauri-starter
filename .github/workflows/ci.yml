@@ -69,3 +69,14 @@ jobs:
       - name: Rust tests
         working-directory: src-tauri
         run: cargo test --all-targets
+
+      # Reuse each runner/dependency cache for both opt-in Turso selections.
+      # The initial steps above validate the checked-in template choice.
+      - name: Check optional Turso backends
+        shell: bash
+        run: |
+          for import_sqlcipher in false true; do
+            node scripts/configure.mjs --database turso --import-sqlcipher "$import_sqlcipher"
+            cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+            cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+          done

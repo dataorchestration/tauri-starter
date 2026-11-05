@@ -37,6 +37,6 @@ export default defineConfig(() => ({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
-    exclude: ["**/node_modules/**", "**/dist/**", "**/src-tauri/**"],
+    exclude: ["**/node_modules/**", "**/dist/**", "**/src-tauri/**", "**/scripts/**"],
   },
 }));

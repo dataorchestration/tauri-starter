@@ -40,6 +40,7 @@ impl From<DbError> for IpcError {
             DbError::WrongKey => "db_wrong_key",
             DbError::Keychain(_) => "keychain",
             DbError::Validation(_) => "validation",
+            DbError::Unsupported(_) => "feature_unavailable",
             _ => "db",
         };
         Self::new(code, e.to_string())
@@ -91,6 +92,7 @@ pub struct AppInfo {
     pub log_dir: String,
     pub debug: bool,
     pub features: crate::config::Features,
+    pub database: crate::config::DatabaseCfg,
 }
 
 #[tauri::command]
@@ -108,6 +110,7 @@ pub async fn app_info(app: AppHandle, state: State<'_, AppState>) -> IpcResult<A
         log_dir: crate::paths::display(&state.paths.logs),
         debug: cfg!(debug_assertions),
         features: crate::config::get().features.clone(),
+        database: crate::config::get().database.clone(),
     })
 }
 
@@ -495,9 +498,11 @@ pub async fn erase_all_data(state: State<'_, AppState>) -> IpcResult<()> {
     let mut guard = state.db.write().await;
     // All readers have drained. Failure leaves None, so commands cannot write
     // into a temporary in-memory store or race a key rotation.
-    drop(guard.take());
-    db::remove_files(&state.paths.db_file())?;
-    db::remove_files(&state.paths.db_file().with_extension("importing"))?;
+    if let Some(database) = guard.take() {
+        database.close().await?;
+    }
+    db::remove_files(&state.paths.turso_db_file())?;
+    db::remove_files(&state.paths.turso_db_file().with_extension("importing"))?;
     db::remove_files(&state.paths.legacy_db_file())?;
     db::key::delete(&state.meta.identifier)?;
     let key = db::key::load_or_create(&state.meta.identifier)?;
@@ -518,6 +523,10 @@ mod tests {
     fn ipc_error_codes_are_stable() {
         assert_eq!(IpcError::from(DbError::NotFound).code, "not_found");
         assert_eq!(IpcError::from(DbError::WrongKey).code, "db_wrong_key");
+        assert_eq!(
+            IpcError::from(DbError::Unsupported("vectors")).code,
+            "feature_unavailable"
+        );
         assert_eq!(
             IpcError::from(updater::UpdateError::NotConfigured).code,
             "updater_not_configured"

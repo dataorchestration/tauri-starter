@@ -116,9 +116,7 @@ pub fn run() {
             // setup is synchronous and runs before commands are accepted. This
             // is the sole sync/async bridge; command paths await directly.
             let (database, settings) = tauri::async_runtime::block_on(async {
-                let database =
-                    Database::open_or_import(&paths.db_file(), &paths.legacy_db_file(), &key)
-                        .await?;
+                let database = Database::open_for_app(&paths, &key).await?;
                 let settings = db::settings::load(&database).await?;
                 Ok::<_, db::DbError>((database, settings))
             })?;

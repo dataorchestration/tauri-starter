@@ -5,6 +5,7 @@
 // Errors from the core arrive as `{ code, message }` and are re-thrown as
 // `IpcError` so callers can branch on `code` without string matching.
 
+import type { DatabaseConfig } from "./config";
 import { invoke } from "@tauri-apps/api/core";
 
 export class IpcError extends Error {
@@ -49,6 +50,7 @@ export interface AppSettings {
 }
 
 export interface AppInfo {
+  database: DatabaseConfig;
   name: string;
   version: string;
   identifier: string;
