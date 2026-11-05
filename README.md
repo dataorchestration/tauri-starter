@@ -15,7 +15,7 @@ configurable from one file — so you start on your product, not on plumbing.
 | **i18n** — one JSON per language shared by Rust and React (`react-i18next`) | `src/i18n/`, `src-tauri/src/i18n.rs` |
 | **UI foundation** — React 19, Tailwind v4 with light/dark design tokens, `zustand` store, typed IPC wrapper | `src/` |
 | **Hello screen, Settings, Notifications, Permissions views** | `src/components/` |
-| **Build, sign, notarize, publish** — per-platform scripts + CI matrix + tag-triggered release | `scripts/`, `.github/workflows/` |
+| **Build, sign, notarize, publish** — per-platform scripts + CI matrix + manual bundle build + tag-triggered release | `scripts/`, `.github/workflows/` |
 | **Single instance, window-state restore, launch-at-login, native notifications** | feature flags |
 
 ## Quick start
@@ -84,7 +84,9 @@ docs/                    RELEASING.md, ARCHITECTURE.md, TELEMETRY.md
 
 ## Verification gate
 
-Everything must pass before a change is "done" (CI runs the same on all three OSes):
+Everything must pass before a change is "done". CI runs `npm run check` on all three
+OSes; the app-bundle build is local-only (or the manual **Build app** workflow,
+`.github/workflows/build.yml`) to save Actions minutes:
 
 ```sh
 npm run check           # frontend tests + build, cargo fmt/clippy/test
