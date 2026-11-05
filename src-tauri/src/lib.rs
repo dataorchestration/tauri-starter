@@ -16,7 +16,7 @@ pub mod permissions;
 pub mod telemetry;
 pub mod updater;
 
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 
 use tauri::{AppHandle, Manager};
 
@@ -26,20 +26,26 @@ use crate::telemetry::{Meta, Telemetry};
 
 /// Everything commands need, managed by Tauri (`tauri::State<AppState>`).
 pub struct AppState {
-    /// `RwLock` so "erase all data" can swap the database; normal access is
-    /// `read()` (the `Database` serialises its own connection).
-    pub db: RwLock<Database>,
+    /// Async lifecycle lock: erase drains readers before closing the engine.
+    /// None means a reset failed; operations must fail closed until recovery.
+    pub db: RwLock<Option<Database>>,
     pub paths: AppPaths,
     pub telemetry: Telemetry,
     pub meta: Meta,
 }
 
 /// The locale currently in effect (saved choice → OS language → default).
-pub fn current_locale(app: &AppHandle) -> String {
-    let saved = app.try_state::<AppState>().and_then(|s| {
-        let db = s.db.read().unwrap_or_else(|p| p.into_inner());
-        db::settings::load(&db).ok().and_then(|st| st.locale)
-    });
+pub async fn current_locale(app: &AppHandle) -> String {
+    let saved = if let Some(state) = app.try_state::<AppState>() {
+        let db = state.db.read().await;
+        if let Some(db) = db.as_ref() {
+            db::settings::load(db).await.ok().and_then(|st| st.locale)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     i18n::resolve(saved.as_deref())
 }
 
@@ -107,8 +113,15 @@ pub fn run() {
 
             // Encrypted store: key from the keychain, DB under app data.
             let key = db::key::load_or_create(&meta.identifier)?;
-            let database = Database::open(&paths.db_file(), &key)?;
-            let settings = db::settings::load(&database)?;
+            // setup is synchronous and runs before commands are accepted. This
+            // is the sole sync/async bridge; command paths await directly.
+            let (database, settings) = tauri::async_runtime::block_on(async {
+                let database =
+                    Database::open_or_import(&paths.db_file(), &paths.legacy_db_file(), &key)
+                        .await?;
+                let settings = db::settings::load(&database).await?;
+                Ok::<_, db::DbError>((database, settings))
+            })?;
 
             // Telemetry before the crash hook so Sentry's panic integration is
             // the "previous hook" ours chains to.
@@ -129,7 +142,7 @@ pub fn run() {
             }
 
             app.manage(AppState {
-                db: RwLock::new(database),
+                db: RwLock::new(Some(database)),
                 paths,
                 telemetry,
                 meta,
@@ -169,6 +182,12 @@ pub fn run() {
             commands::delete_notification,
             commands::clear_notifications,
             commands::unread_count,
+            commands::create_vector_collection,
+            commands::upsert_vector,
+            commands::get_vector,
+            commands::search_vectors,
+            commands::delete_vector,
+            commands::delete_vector_collection,
             commands::permission_report,
             commands::request_permission,
             commands::open_permission_settings,

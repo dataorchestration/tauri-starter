@@ -10,11 +10,20 @@ use super::DbError;
 const ACCOUNT: &str = "db-key";
 const KEY_BYTES: usize = 32;
 
-/// 32 random bytes as 64 lowercase hex chars (SQLCipher raw-key format).
+/// 32 random bytes as 64 lowercase hex chars (raw encryption key).
 pub fn generate_hex() -> String {
     let mut buf = [0u8; KEY_BYTES];
     getrandom::fill(&mut buf).expect("OS random source unavailable");
     buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub(super) fn validate(key: &str) -> Result<(), DbError> {
+    if key.len() != KEY_BYTES * 2 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(DbError::Keychain(
+            "database key must be 64 hexadecimal characters".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn entry(service: &str) -> Result<Entry, DbError> {
@@ -26,8 +35,10 @@ fn entry(service: &str) -> Result<Entry, DbError> {
 pub fn load_or_create(service: &str) -> Result<String, DbError> {
     let e = entry(service)?;
     match e.get_password() {
-        Ok(k) if k.len() == KEY_BYTES * 2 => Ok(k),
-        Ok(_) => Err(DbError::Keychain("stored key has the wrong length".into())),
+        Ok(k) => {
+            validate(&k)?;
+            Ok(k)
+        }
         Err(keyring::Error::NoEntry) => {
             let k = generate_hex();
             e.set_password(&k)
@@ -59,6 +70,13 @@ pub fn delete(service: &str) -> Result<(), DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_malformed_keys_before_opening_a_database() {
+        for key in ["".to_owned(), "0".repeat(63), "z".repeat(64)] {
+            assert!(validate(&key).is_err());
+        }
+    }
 
     #[test]
     fn generated_keys_are_64_hex_chars_and_unique() {

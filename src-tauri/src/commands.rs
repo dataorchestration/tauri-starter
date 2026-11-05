@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::db::notifications::{Notification, NotificationKind};
 use crate::db::settings::{AppSettings, Theme};
 use crate::db::users::{NewUser, User};
+use crate::db::vectors::{DistanceMetric, VectorDocument, VectorMatch};
 use crate::db::{self, DbError};
 use crate::health::HealthReport;
 use crate::permissions::{Permission, PermissionReport, PermissionState};
@@ -38,6 +39,7 @@ impl From<DbError> for IpcError {
             DbError::NotFound => "not_found",
             DbError::WrongKey => "db_wrong_key",
             DbError::Keychain(_) => "keychain",
+            DbError::Validation(_) => "validation",
             _ => "db",
         };
         Self::new(code, e.to_string())
@@ -62,12 +64,15 @@ impl From<updater::UpdateError> for IpcError {
 
 type IpcResult<T> = Result<T, IpcError>;
 
-fn with_db<T>(
+async fn with_db<T>(
     state: &AppState,
-    f: impl FnOnce(&db::Database) -> Result<T, DbError>,
+    f: impl AsyncFnOnce(&db::Database) -> Result<T, DbError>,
 ) -> IpcResult<T> {
-    let guard = state.db.read().unwrap_or_else(|p| p.into_inner());
-    Ok(f(&guard)?)
+    let guard = state.db.read().await;
+    let db = guard
+        .as_ref()
+        .ok_or_else(|| IpcError::new("db", "database unavailable; retry erase or restart"))?;
+    Ok(f(db).await?)
 }
 
 // ---------------------------------------------------------------- app info
@@ -89,8 +94,8 @@ pub struct AppInfo {
 }
 
 #[tauri::command]
-pub fn app_info(app: AppHandle, state: State<'_, AppState>) -> IpcResult<AppInfo> {
-    let settings = with_db(&state, db::settings::load)?;
+pub async fn app_info(app: AppHandle, state: State<'_, AppState>) -> IpcResult<AppInfo> {
+    let settings = with_db(&state, db::settings::load).await?;
     Ok(AppInfo {
         name: app.package_info().name.clone(),
         version: app.package_info().version.to_string(),
@@ -107,32 +112,37 @@ pub fn app_info(app: AppHandle, state: State<'_, AppState>) -> IpcResult<AppInfo
 }
 
 #[tauri::command]
-pub fn health_check(app: AppHandle, state: State<'_, AppState>) -> HealthReport {
-    health::run(&app, &state)
+pub async fn health_check(app: AppHandle, state: State<'_, AppState>) -> IpcResult<HealthReport> {
+    Ok(health::run(&app, &state).await)
 }
 
 // ---------------------------------------------------------------- settings
 
 #[tauri::command]
-pub fn get_settings(state: State<'_, AppState>) -> IpcResult<AppSettings> {
-    with_db(&state, db::settings::load)
+pub async fn get_settings(state: State<'_, AppState>) -> IpcResult<AppSettings> {
+    with_db(&state, db::settings::load).await
 }
 
 /// Persist settings and apply the side effects (autostart, telemetry switch,
 /// menu language, native window theme). Returns the stored value.
 #[tauri::command]
-pub fn save_settings(
+pub async fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> IpcResult<AppSettings> {
-    let previous = with_db(&state, db::settings::load)?;
+    // Keep reset excluded through persistence and all settings side effects.
+    let guard = state.db.read().await;
+    let database = guard
+        .as_ref()
+        .ok_or_else(|| IpcError::new("db", "database unavailable"))?;
+    let previous = db::settings::load(database).await?;
     // The device id is server-side state; the webview can't change it.
     let settings = AppSettings {
         device_id: previous.device_id.clone(),
         ..settings
     };
-    with_db(&state, |d| db::settings::save(d, &settings))?;
+    db::settings::save(database, &settings).await?;
 
     state.telemetry.set_enabled(settings.telemetry_enabled);
     if previous.telemetry_enabled != settings.telemetry_enabled {
@@ -175,26 +185,26 @@ pub fn save_settings(
 // ---------------------------------------------------------------- users
 
 #[tauri::command]
-pub fn list_users(state: State<'_, AppState>) -> IpcResult<Vec<User>> {
-    with_db(&state, db::users::list)
+pub async fn list_users(state: State<'_, AppState>) -> IpcResult<Vec<User>> {
+    with_db(&state, db::users::list).await
 }
 
 #[tauri::command]
-pub fn create_user(state: State<'_, AppState>, user: NewUser) -> IpcResult<User> {
+pub async fn create_user(state: State<'_, AppState>, user: NewUser) -> IpcResult<User> {
     if user.display_name.trim().is_empty() {
         return Err(IpcError::new("validation", "display_name is required"));
     }
-    with_db(&state, |d| db::users::create(d, user))
+    with_db(&state, async |d| db::users::create(d, user).await).await
 }
 
 #[tauri::command]
-pub fn update_user(state: State<'_, AppState>, user: User) -> IpcResult<User> {
-    with_db(&state, |d| db::users::update(d, &user))
+pub async fn update_user(state: State<'_, AppState>, user: User) -> IpcResult<User> {
+    with_db(&state, async |d| db::users::update(d, &user).await).await
 }
 
 #[tauri::command]
-pub fn delete_user(state: State<'_, AppState>, id: String) -> IpcResult<bool> {
-    with_db(&state, |d| db::users::delete(d, &id))
+pub async fn delete_user(state: State<'_, AppState>, id: String) -> IpcResult<bool> {
+    with_db(&state, async |d| db::users::delete(d, &id).await).await
 }
 
 // ---------------------------------------------------------------- notifications
@@ -212,27 +222,32 @@ pub struct NewNotification {
 }
 
 #[tauri::command]
-pub fn list_notifications(
+pub async fn list_notifications(
     state: State<'_, AppState>,
     limit: Option<u32>,
 ) -> IpcResult<Vec<Notification>> {
-    with_db(&state, |d| db::notifications::list(d, limit.unwrap_or(100)))
+    with_db(&state, async |d| {
+        db::notifications::list(d, limit.unwrap_or(100)).await
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn add_notification(
+pub async fn add_notification(
     app: AppHandle,
     state: State<'_, AppState>,
     notification: NewNotification,
 ) -> IpcResult<Notification> {
-    let n = with_db(&state, |d| {
+    let n = with_db(&state, async |d| {
         db::notifications::insert(
             d,
             &notification.title,
             &notification.body,
             notification.kind,
         )
-    })?;
+        .await
+    })
+    .await?;
     if notification.native {
         crate::notify(&app, &n.title, &n.body);
     }
@@ -241,34 +256,110 @@ pub fn add_notification(
 }
 
 #[tauri::command]
-pub fn mark_notification_read(
+pub async fn mark_notification_read(
     state: State<'_, AppState>,
     id: i64,
     read: Option<bool>,
 ) -> IpcResult<bool> {
-    with_db(&state, |d| {
-        db::notifications::mark_read(d, id, read.unwrap_or(true))
+    with_db(&state, async |d| {
+        db::notifications::mark_read(d, id, read.unwrap_or(true)).await
     })
+    .await
 }
 
 #[tauri::command]
-pub fn mark_all_notifications_read(state: State<'_, AppState>) -> IpcResult<usize> {
-    with_db(&state, db::notifications::mark_all_read)
+pub async fn mark_all_notifications_read(state: State<'_, AppState>) -> IpcResult<u64> {
+    with_db(&state, db::notifications::mark_all_read).await
 }
 
 #[tauri::command]
-pub fn delete_notification(state: State<'_, AppState>, id: i64) -> IpcResult<bool> {
-    with_db(&state, |d| db::notifications::delete(d, id))
+pub async fn delete_notification(state: State<'_, AppState>, id: i64) -> IpcResult<bool> {
+    with_db(&state, async |d| db::notifications::delete(d, id).await).await
 }
 
 #[tauri::command]
-pub fn clear_notifications(state: State<'_, AppState>) -> IpcResult<usize> {
-    with_db(&state, db::notifications::clear)
+pub async fn clear_notifications(state: State<'_, AppState>) -> IpcResult<u64> {
+    with_db(&state, db::notifications::clear).await
 }
 
 #[tauri::command]
-pub fn unread_count(state: State<'_, AppState>) -> IpcResult<i64> {
-    with_db(&state, db::notifications::unread_count)
+pub async fn unread_count(state: State<'_, AppState>) -> IpcResult<i64> {
+    with_db(&state, db::notifications::unread_count).await
+}
+
+// ---------------------------------------------------------------- vectors
+
+#[tauri::command]
+pub async fn create_vector_collection(
+    state: State<'_, AppState>,
+    name: String,
+    dimensions: u32,
+) -> IpcResult<()> {
+    with_db(&state, async |d| {
+        db::vectors::create_collection(d, &name, dimensions).await
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn upsert_vector(state: State<'_, AppState>, document: VectorDocument) -> IpcResult<()> {
+    with_db(&state, async |d| db::vectors::upsert(d, &document).await).await
+}
+
+#[tauri::command]
+pub async fn get_vector(
+    state: State<'_, AppState>,
+    collection: String,
+    id: String,
+) -> IpcResult<Option<VectorDocument>> {
+    with_db(&state, async |d| {
+        db::vectors::get(d, &collection, &id).await
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn search_vectors(
+    state: State<'_, AppState>,
+    collection: String,
+    embedding: Vec<f32>,
+    limit: Option<u32>,
+    metric: Option<DistanceMetric>,
+) -> IpcResult<Vec<VectorMatch>> {
+    with_db(&state, async |d| {
+        db::vectors::search(
+            d,
+            &collection,
+            &embedding,
+            limit.unwrap_or(10),
+            metric.unwrap_or_default(),
+        )
+        .await
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_vector(
+    state: State<'_, AppState>,
+    collection: String,
+    id: String,
+) -> IpcResult<bool> {
+    with_db(&state, async |d| {
+        db::vectors::delete(d, &collection, &id).await
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_vector_collection(
+    state: State<'_, AppState>,
+    collection: String,
+) -> IpcResult<bool> {
+    with_db(&state, async |d| {
+        db::vectors::delete_collection(d, &collection).await
+    })
+    .await
 }
 
 // ---------------------------------------------------------------- permissions
@@ -400,18 +491,19 @@ pub fn open_logs_folder(app: AppHandle, state: State<'_, AppState>) -> IpcResult
 /// Delete the encrypted database and rotate its key. Settings return to
 /// defaults (with a NEW anonymous device id). The webview should reload.
 #[tauri::command]
-pub fn erase_all_data(state: State<'_, AppState>) -> IpcResult<()> {
-    let mut guard = state.db.write().unwrap_or_else(|p| p.into_inner());
-    let placeholder = db::Database::open_in_memory()?;
-    drop(std::mem::replace(&mut *guard, placeholder));
-    let file = state.paths.db_file();
-    for suffix in ["", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", file.display()));
-    }
+pub async fn erase_all_data(state: State<'_, AppState>) -> IpcResult<()> {
+    let mut guard = state.db.write().await;
+    // All readers have drained. Failure leaves None, so commands cannot write
+    // into a temporary in-memory store or race a key rotation.
+    drop(guard.take());
+    db::remove_files(&state.paths.db_file())?;
+    db::remove_files(&state.paths.db_file().with_extension("importing"))?;
+    db::remove_files(&state.paths.legacy_db_file())?;
     db::key::delete(&state.meta.identifier)?;
     let key = db::key::load_or_create(&state.meta.identifier)?;
-    *guard = db::Database::open(&file, &key)?;
-    let fresh = db::settings::load(&guard)?;
+    let database = db::Database::open(&state.paths.db_file(), &key).await?;
+    let fresh = db::settings::load(&database).await?;
+    *guard = Some(database);
     state.telemetry.set_enabled(fresh.telemetry_enabled);
     state.telemetry.set_device_id(Some(fresh.device_id));
     tracing::warn!(target: "settings", "all local data erased");

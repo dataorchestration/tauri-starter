@@ -1,123 +1,169 @@
-//! Encrypted local store.
-//!
-//! One SQLCipher database (`app.sqlite` under the app data dir) encrypted with
-//! a random 256-bit key held in the OS keychain ([`key`]). The file is
-//! unreadable if copied off the machine or opened by another account.
-//! Migrations are plain SQL files applied in order and tracked with
-//! `PRAGMA user_version` — no extra dependency.
+//! Encrypted, local Turso store with native async queries.
+//! SQLCipher files are imported by `legacy`; see docs/DATABASE.md.
 
 pub mod key;
+mod legacy;
+pub(crate) use legacy::remove_files;
 pub mod notifications;
 pub mod settings;
 pub mod users;
+pub mod vectors;
 
 use std::path::Path;
-use std::sync::Mutex;
-
-use rusqlite::Connection;
+use tokio::sync::{Mutex, MutexGuard};
+use turso::{Builder, Connection, EncryptionOpts};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error("database error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    #[error("database is encrypted with a different key")]
+    Turso(#[from] turso::Error),
+    #[error("legacy database error: {0}")]
+    Legacy(rusqlite::Error),
+    #[error("database key is invalid or the encrypted file is damaged")]
     WrongKey,
     #[error("keychain error: {0}")]
     Keychain(String),
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("database file error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Validation(String),
+    #[error("unsupported schema version {0}; refusing to modify this database")]
+    SchemaVersion(i64),
     #[error("not found")]
     NotFound,
 }
 
-/// Ordered migrations. Append only.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
+impl From<rusqlite::Error> for DbError {
+    fn from(error: rusqlite::Error) -> Self {
+        if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::NotADatabase)
+        {
+            Self::WrongKey
+        } else {
+            Self::Legacy(error)
+        }
+    }
+}
+
+/// Ordered migrations. Append only; migration 1 is shared with old installs.
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_init.sql"),
+    include_str!("migrations/0002_vectors.sql"),
+];
 
 pub struct Database {
+    // Keep the engine alive until its connection is dropped.
     conn: Mutex<Connection>,
+    _engine: turso::Database,
 }
 
 impl Database {
-    /// Open (creating if needed) the encrypted database at `path` with `key_hex`
-    /// (64 hex chars = 32 bytes, see [`key::generate_hex`]).
-    pub fn open(path: &Path, key_hex: &str) -> Result<Self, DbError> {
-        let conn = Connection::open(path)?;
-        Self::init(conn, Some(key_hex))
+    /// Open the new store, importing an old SQLCipher install when needed.
+    /// The original encrypted file is retained for recovery.
+    pub async fn open_or_import(path: &Path, legacy: &Path, key: &str) -> Result<Self, DbError> {
+        if !path.try_exists()? && legacy.try_exists()? {
+            legacy::import(path, legacy, key).await?;
+        }
+        Self::open(path, key).await
     }
 
-    /// Unencrypted in-memory database for tests and tooling.
-    pub fn open_in_memory() -> Result<Self, DbError> {
-        Self::init(Connection::open_in_memory()?, None)
+    pub async fn open(path: &Path, key: &str) -> Result<Self, DbError> {
+        key::validate(key)?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| DbError::Validation("database path is not UTF-8".into()))?;
+        let engine = Builder::new_local(path)
+            .experimental_encryption(true)
+            .with_encryption(EncryptionOpts {
+                cipher: "aegis256".into(),
+                hexkey: key.into(),
+            })
+            .build()
+            .await
+            .map_err(|e| match e {
+                turso::Error::NotAdb(_) => DbError::WrongKey,
+                // The pinned SDK reports an authentication failure as a generic
+                // error; retain the starter's stable wrong-key IPC code.
+                turso::Error::Error(ref message)
+                    if message.contains("decryption failed: invalid tag")
+                        || message.starts_with("Decryption failed for page=") =>
+                {
+                    DbError::WrongKey
+                }
+                other => DbError::Turso(other),
+            })?;
+        Self::init(engine).await
     }
 
-    fn init(conn: Connection, key_hex: Option<&str>) -> Result<Self, DbError> {
-        if let Some(k) = key_hex {
-            // Raw-key form: SQLCipher uses the bytes as-is (no KDF), which is
-            // what we want for a random key.
-            conn.pragma_update(None, "key", format!("x'{k}'"))?;
-        }
-        // The first real read fails with NotADatabase when the key is wrong.
-        match conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
-            r.get::<_, i64>(0)
-        }) {
-            Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(e, _))
-                if e.code == rusqlite::ErrorCode::NotADatabase =>
-            {
-                return Err(DbError::WrongKey);
-            }
-            Err(e) => return Err(e.into()),
-        }
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        migrate(&conn)?;
+    /// Unencrypted and ephemeral; only for tests and tooling.
+    pub async fn open_in_memory() -> Result<Self, DbError> {
+        Self::init(Builder::new_local(":memory:").build().await?).await
+    }
+
+    async fn init(engine: turso::Database) -> Result<Self, DbError> {
+        let mut conn = engine.connect()?;
+        conn.execute("PRAGMA foreign_keys = ON", ()).await?;
+        migrate(&mut conn, MIGRATIONS).await?;
         Ok(Self {
             conn: Mutex::new(conn),
+            _engine: engine,
         })
     }
 
-    /// Run `f` with the connection. The lock is held for the closure only, so
-    /// keep transactions inside it.
-    pub fn with<T>(
-        &self,
-        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
-    ) -> Result<T, DbError> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(f(&conn)?)
+    /// Async serialization keeps multi-statement operations and row IDs isolated.
+    /// Never hold a std::sync lock across database I/O.
+    pub(crate) async fn connection(&self) -> MutexGuard<'_, Connection> {
+        self.conn.lock().await
     }
 
-    /// Schema version currently applied.
-    pub fn schema_version(&self) -> Result<i64, DbError> {
-        self.with(|c| c.query_row("PRAGMA user_version", [], |r| r.get(0)))
+    pub async fn schema_version(&self) -> Result<i64, DbError> {
+        let conn = self.connection().await;
+        Ok(conn
+            .query("PRAGMA user_version", ())
+            .await?
+            .next()
+            .await?
+            .ok_or(turso::Error::QueryReturnedNoRows)?
+            .get(0)?)
+    }
+
+    pub(crate) async fn checkpoint(&self) -> Result<(), DbError> {
+        let conn = self.connection().await;
+        let mut rows = conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
+        while let Some(row) = rows.next().await? {
+            if row.get::<i64>(0)? != 0 {
+                return Err(DbError::Validation("database checkpoint is busy".into()));
+            }
+        }
+        Ok(())
     }
 }
 
-/// Apply any migrations newer than `PRAGMA user_version`, each in its own
-/// transaction so a failure leaves the schema at a known version.
-fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    for (i, sql) in MIGRATIONS.iter().enumerate() {
-        let version = i as i64 + 1;
-        if version <= current {
-            continue;
-        }
-        conn.execute_batch("BEGIN")?;
-        let applied = conn
-            .execute_batch(sql)
-            .and_then(|_| conn.pragma_update(None, "user_version", version));
-        match applied {
-            Ok(()) => conn.execute_batch("COMMIT")?,
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
-            }
-        }
+async fn migrate(conn: &mut Connection, migrations: &[&str]) -> Result<(), DbError> {
+    let current: i64 = conn
+        .query("PRAGMA user_version", ())
+        .await?
+        .next()
+        .await?
+        .ok_or(turso::Error::QueryReturnedNoRows)?
+        .get(0)?;
+    if current < 0 || current > migrations.len() as i64 {
+        return Err(DbError::SchemaVersion(current));
+    }
+    for (i, sql) in migrations.iter().enumerate().skip(current as usize) {
+        let tx = conn.transaction().await?;
+        tx.execute_batch(sql).await?;
+        tx.execute(&format!("PRAGMA user_version = {}", i + 1), ())
+            .await?;
+        tx.commit().await?;
     }
     Ok(())
 }
 
 /// True when the file on disk does NOT start with the plaintext SQLite header,
-/// i.e. it is encrypted. Used by the health check.
+/// a sanity check used after successfully opening with encryption enabled.
+/// This header check alone is not proof of encryption.
 pub fn file_is_encrypted(path: &Path) -> bool {
     use std::io::Read;
     let mut magic = [0u8; 16];
@@ -146,49 +192,95 @@ pub(crate) fn temp_db_path(tag: &str) -> std::path::PathBuf {
 mod tests {
     use super::*;
 
-    #[test]
-    fn migrations_apply_once_and_are_idempotent() {
-        let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
-        db.with(migrate).unwrap();
-        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+    #[tokio::test]
+    async fn migrations_are_idempotent_and_fail_atomically() {
+        let db = Database::open_in_memory().await.unwrap();
+        assert_eq!(db.schema_version().await.unwrap(), MIGRATIONS.len() as i64);
+        {
+            let mut conn = db.connection().await;
+            migrate(&mut conn, MIGRATIONS).await.unwrap();
+            let mut broken = MIGRATIONS.to_vec();
+            broken.push("CREATE TABLE partial (id INTEGER); INSERT INTO missing_table VALUES (1);");
+            assert!(migrate(&mut conn, &broken).await.is_err());
+            let mut rows = conn
+                .query(
+                    "SELECT count(*) FROM sqlite_master WHERE name='partial'",
+                    (),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+                0
+            );
+        }
+        assert_eq!(db.schema_version().await.unwrap(), 2);
+        let mut conn = db.connection().await;
+        conn.execute("PRAGMA user_version = 999", ()).await.unwrap();
+        assert!(matches!(
+            migrate(&mut conn, MIGRATIONS).await,
+            Err(DbError::SchemaVersion(999))
+        ));
     }
 
-    #[test]
-    fn encrypted_file_rejects_wrong_key_and_hides_plaintext() {
-        let path = temp_db_path("enc");
-        let k1 = key::generate_hex();
-        let k2 = key::generate_hex();
-        {
-            let db = Database::open(&path, &k1).unwrap();
-            db.with(|c| {
-                c.execute(
-                    "INSERT INTO settings (key, value, updated_at) VALUES ('probe', 'plaintext-marker', 1)",
-                    [],
-                )
-            })
+    #[tokio::test]
+    async fn encrypted_store_and_wal_hide_content_and_reopen() {
+        let path = temp_db_path("turso");
+        let key = key::generate_hex();
+        let db = Database::open(&path, &key).await.unwrap();
+        settings::set_raw(&db, "probe", "plaintext-marker")
+            .await
             .unwrap();
+        for entry in std::fs::read_dir(path.parent().unwrap()).unwrap() {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            assert!(!bytes.windows(16).any(|w| w == b"plaintext-marker"));
         }
+        db.checkpoint().await.unwrap();
+        drop(db);
+        assert!(file_is_encrypted(&path));
+        let wrong = Database::open(&path, &key::generate_hex()).await;
         assert!(
-            file_is_encrypted(&path),
-            "header must not be plaintext SQLite"
+            matches!(wrong, Err(DbError::WrongKey)),
+            "unexpected error: {:?}",
+            wrong.err()
         );
-        let bytes = std::fs::read(&path).unwrap();
-        assert!(
-            !bytes.windows(16).any(|w| w == b"plaintext-marker"),
-            "row content must not appear in the file"
+        let db = Database::open(&path, &key).await.unwrap();
+        assert_eq!(
+            settings::get_raw(&db, "probe").await.unwrap().as_deref(),
+            Some("plaintext-marker")
         );
-        assert!(matches!(Database::open(&path, &k2), Err(DbError::WrongKey)));
-        // Reopen with the right key still works.
-        let db = Database::open(&path, &k1).unwrap();
-        let v: String = db
-            .with(|c| {
-                c.query_row("SELECT value FROM settings WHERE key='probe'", [], |r| {
-                    r.get(0)
-                })
-            })
-            .unwrap();
-        assert_eq!(v, "plaintext-marker");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        drop(db);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_notifications_keep_their_own_row_ids() {
+        let db = std::sync::Arc::new(Database::open_in_memory().await.unwrap());
+        let mut tasks = Vec::new();
+        for i in 0..20 {
+            let db = db.clone();
+            tasks.push(tokio::spawn(async move {
+                notifications::insert(
+                    &db,
+                    &format!("item-{i}"),
+                    "",
+                    notifications::NotificationKind::Info,
+                )
+                .await
+                .unwrap()
+            }));
+        }
+        let stored = {
+            let mut returned = Vec::new();
+            for task in tasks {
+                returned.push(task.await.unwrap());
+            }
+            returned
+        };
+        let all = notifications::list(&db, 100).await.unwrap();
+        assert_eq!(all.len(), 20);
+        for item in stored {
+            assert!(all.contains(&item));
+        }
     }
 }

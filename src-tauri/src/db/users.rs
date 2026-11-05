@@ -2,8 +2,8 @@
 //! no password here. Wire it to your auth provider by storing the remote id in
 //! `id` (or add a column in a new migration).
 
-use rusqlite::{OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
+use turso::{Row, params};
 
 use super::{Database, DbError, now_millis};
 
@@ -24,7 +24,7 @@ pub struct NewUser {
     pub avatar_path: Option<String>,
 }
 
-fn row_to_user(r: &Row) -> rusqlite::Result<User> {
+fn row_to_user(r: &Row) -> turso::Result<User> {
     Ok(User {
         id: r.get(0)?,
         display_name: r.get(1)?,
@@ -37,7 +37,7 @@ fn row_to_user(r: &Row) -> rusqlite::Result<User> {
 
 const COLS: &str = "id, display_name, email, avatar_path, created_at, updated_at";
 
-pub fn create(db: &Database, new: NewUser) -> Result<User, DbError> {
+pub async fn create(db: &Database, new: NewUser) -> Result<User, DbError> {
     let now = now_millis();
     let user = User {
         id: uuid::Uuid::new_v4().to_string(),
@@ -47,49 +47,42 @@ pub fn create(db: &Database, new: NewUser) -> Result<User, DbError> {
         created_at: now,
         updated_at: now,
     };
-    db.with(|c| {
-        c.execute(
-            "INSERT INTO users (id, display_name, email, avatar_path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                user.id,
-                user.display_name,
-                user.email,
-                user.avatar_path,
-                user.created_at,
-                user.updated_at
-            ],
-        )
-    })?;
+    db.connection().await.execute(
+        "INSERT INTO users (id, display_name, email, avatar_path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![user.id.clone(), user.display_name.clone(), user.email.clone(), user.avatar_path.clone(), user.created_at, user.updated_at],
+    ).await?;
     Ok(user)
 }
 
-pub fn get(db: &Database, id: &str) -> Result<Option<User>, DbError> {
-    db.with(|c| {
-        c.query_row(
-            &format!("SELECT {COLS} FROM users WHERE id = ?1"),
-            [id],
-            row_to_user,
+pub async fn get(db: &Database, id: &str) -> Result<Option<User>, DbError> {
+    let conn = db.connection().await;
+    let mut rows = conn
+        .query(format!("SELECT {COLS} FROM users WHERE id = ?1"), [id])
+        .await?;
+    Ok(rows.next().await?.as_ref().map(row_to_user).transpose()?)
+}
+
+pub async fn list(db: &Database) -> Result<Vec<User>, DbError> {
+    let conn = db.connection().await;
+    let mut rows = conn
+        .query(
+            format!("SELECT {COLS} FROM users ORDER BY created_at, id"),
+            (),
         )
-        .optional()
-    })
+        .await?;
+    let mut users = Vec::new();
+    while let Some(row) = rows.next().await? {
+        users.push(row_to_user(&row)?);
+    }
+    Ok(users)
 }
 
-pub fn list(db: &Database) -> Result<Vec<User>, DbError> {
-    db.with(|c| {
-        let mut st = c.prepare(&format!("SELECT {COLS} FROM users ORDER BY created_at"))?;
-        st.query_map([], row_to_user)?.collect()
-    })
-}
-
-/// Full-row update; `updated_at` is set here. Returns the stored row.
-pub fn update(db: &Database, user: &User) -> Result<User, DbError> {
+pub async fn update(db: &Database, user: &User) -> Result<User, DbError> {
     let now = now_millis();
-    let n = db.with(|c| {
-        c.execute(
-            "UPDATE users SET display_name = ?2, email = ?3, avatar_path = ?4, updated_at = ?5 WHERE id = ?1",
-            params![user.id, user.display_name, user.email, user.avatar_path, now],
-        )
-    })?;
+    let n = db.connection().await.execute(
+        "UPDATE users SET display_name = ?2, email = ?3, avatar_path = ?4, updated_at = ?5 WHERE id = ?1",
+        params![user.id.clone(), user.display_name.clone(), user.email.clone(), user.avatar_path.clone(), now],
+    ).await?;
     if n == 0 {
         return Err(DbError::NotFound);
     }
@@ -99,17 +92,22 @@ pub fn update(db: &Database, user: &User) -> Result<User, DbError> {
     })
 }
 
-pub fn delete(db: &Database, id: &str) -> Result<bool, DbError> {
-    Ok(db.with(|c| c.execute("DELETE FROM users WHERE id = ?1", [id]))? > 0)
+pub async fn delete(db: &Database, id: &str) -> Result<bool, DbError> {
+    Ok(db
+        .connection()
+        .await
+        .execute("DELETE FROM users WHERE id = ?1", [id])
+        .await?
+        > 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn crud_roundtrip() {
-        let db = Database::open_in_memory().unwrap();
+    #[tokio::test]
+    async fn crud_roundtrip() {
+        let db = Database::open_in_memory().await.unwrap();
         let u = create(
             &db,
             NewUser {
@@ -118,21 +116,25 @@ mod tests {
                 avatar_path: None,
             },
         )
+        .await
         .unwrap();
-        assert_eq!(get(&db, &u.id).unwrap().unwrap(), u);
-        assert_eq!(list(&db).unwrap().len(), 1);
+        assert_eq!(get(&db, &u.id).await.unwrap().unwrap(), u);
+        assert_eq!(list(&db).await.unwrap().len(), 1);
 
         let renamed = User {
             display_name: "Ada L.".into(),
             ..u.clone()
         };
-        let stored = update(&db, &renamed).unwrap();
+        let stored = update(&db, &renamed).await.unwrap();
         assert_eq!(stored.display_name, "Ada L.");
         assert!(stored.updated_at >= u.updated_at);
 
-        assert!(delete(&db, &u.id).unwrap());
-        assert!(!delete(&db, &u.id).unwrap());
-        assert!(get(&db, &u.id).unwrap().is_none());
-        assert!(matches!(update(&db, &renamed), Err(DbError::NotFound)));
+        assert!(delete(&db, &u.id).await.unwrap());
+        assert!(!delete(&db, &u.id).await.unwrap());
+        assert!(get(&db, &u.id).await.unwrap().is_none());
+        assert!(matches!(
+            update(&db, &renamed).await,
+            Err(DbError::NotFound)
+        ));
     }
 }

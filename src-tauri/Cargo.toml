@@ -23,8 +23,11 @@ tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-# Encrypted local store: SQLCipher compiled in (no system SQLite needed), key in
-# the OS keychain. See src/db/.
+# Native async embedded store. Pin the pre-1.0 engine; encryption is experimental
+# upstream. No cloud account, network client, FTS, or global allocator required.
+turso = { version = "=0.8.3", default-features = false, features = ["pure-rust-crypto"] }
+tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
+# Used ONLY to import existing SQLCipher installs without a plaintext export.
 rusqlite = { version = "0.41", features = ["bundled-sqlcipher-vendored-openssl"] }
 keyring = "4"
 getrandom = "0.4"

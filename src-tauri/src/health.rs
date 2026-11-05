@@ -59,10 +59,16 @@ pub fn updater_configured(app: &AppHandle) -> bool {
         .is_some_and(|k| !k.is_empty() && !k.starts_with("REPLACE_WITH"))
 }
 
-pub fn run(app: &AppHandle, state: &AppState) -> HealthReport {
+pub async fn run(app: &AppHandle, state: &AppState) -> HealthReport {
     let (db, schema_version) = {
-        let guard = state.db.read().unwrap_or_else(|p| p.into_inner());
-        match guard.schema_version() {
+        let guard = state.db.read().await;
+        let version = match guard.as_ref() {
+            Some(db) => db.schema_version().await,
+            None => Err(crate::db::DbError::Validation(
+                "database unavailable".into(),
+            )),
+        };
+        match version {
             Ok(v) => {
                 let encrypted = crate::db::file_is_encrypted(&state.paths.db_file());
                 if encrypted {

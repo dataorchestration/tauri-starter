@@ -9,7 +9,7 @@
                                                        ▼
 ┌──────────────── Rust core (src-tauri) ────────────────────────┐
 │ commands.rs  (thin IPC surface; IpcError { code, message })    │
-│   ├─ db/        SQLCipher store · key.rs (OS keychain) · CRUD  │
+│   ├─ db/        async Turso · key.rs (OS keychain) · CRUD/vectors  │
 │   ├─ telemetry/ tracing → file log · Sink trait → sentry/http │
 │   ├─ crash.rs   panic hook → crashes/*.json → send/dismiss     │
 │   ├─ permissions.rs / health.rs                                │
@@ -25,7 +25,8 @@
 1. Plugins. `single-instance` must be first. Desktop-only plugins are gated by
    `#[cfg(desktop)]` and by `features.*` in `starter.config.json`.
 2. `setup`: resolve `AppPaths` → load/create the DB key from the keychain →
-   open the encrypted DB (runs migrations) → load settings.
+   open/import the encrypted Turso DB (runs migrations) → load settings.
+   Tauri setup uses one `block_on` bridge before accepting commands.
 3. Telemetry **before** the crash hook, so Sentry's panic integration is the
    "previous hook" ours chains to.
 4. Menu + tray with the resolved locale. `AppState` is managed for commands.
@@ -33,19 +34,27 @@
 
 ## State and threading
 
-- `AppState { db: RwLock<Database>, paths, telemetry, meta }`. `Database` holds
-  a `Mutex<Connection>`; the outer `RwLock` exists only so "erase all data" can
-  swap the database. Commands take `read()`.
+- `AppState { db: tokio::sync::RwLock<Option<Database>>, paths, telemetry, meta }`.
+  A command holds a read guard through its database operation. Erase takes the
+  write guard, drains in-flight operations, closes the engine, removes both
+  stores, rotates the key, and opens a fresh store. On failure the state stays
+  unavailable (`None`), never an accidentally writable in-memory fallback.
+- `Database` owns a Turso engine and an async `Mutex<Connection>`. This
+  deliberately serializes operations, including notification insert/row-ID
+  retrieval and vector collection dimension checks. It does not claim concurrent
+  writers or parallel searches. Transactions roll back on drop.
+- Database methods and their IPC commands use native async/await. Only the
+  one-time SQLCipher snapshot uses `spawn_blocking`; ordinary Turso queries do
+  not. OS keychain/file operations still use their synchronous APIs.
 - Telemetry runs one worker thread (`std::sync::mpsc`), batching by count and
   interval. Sinks are called from that thread only.
-- Commands are sync unless they await (updater). Keep DB work inside the
-  closure passed to `Database::with` so the lock is short.
 
 ## Data on disk
 
 | Path (macOS example) | What |
 | --- | --- |
-| `~/Library/Application Support/<App>/app.sqlite` | SQLCipher DB (+ `-wal`, `-shm`) |
+| `~/Library/Application Support/<App>/app.turso.sqlite` | encrypted Turso DB (+ `-wal`) |
+| `~/Library/Application Support/<App>/app.sqlite` | retained legacy SQLCipher DB after import |
 | `~/Library/Application Support/<App>/crashes/*.json` | pending crash reports |
 | `~/Library/Logs/<App>/app.YYYY-MM-DD.log` | rolling logs (7 by default) |
 | macOS Keychain, service = bundle identifier, account `db-key` | 32-byte DB key (hex) |
@@ -65,14 +74,14 @@ Windows: `%APPDATA%\<identifier>`, Credential Manager. Linux: `~/.local/share/<i
 ## Adding things
 
 **A command**
-1. `commands.rs`: `#[tauri::command] pub fn thing(state: State<AppState>, arg: T) -> IpcResult<U>`
+1. `commands.rs`: `#[tauri::command] pub async fn thing(state: State<'_, AppState>, arg: T) -> IpcResult<U>`
 2. `lib.rs`: add to `generate_handler![...]`
 3. `src/lib/ipc.ts`: `thing: (arg: T) => call<U>("thing", { arg })` + types
 4. Test the pure logic in the module it calls; UI tests mock `invoke` via `src/test/harness.ts`.
 
-**A table** — `db/migrations/0002_<name>.sql`, append to `MIGRATIONS` in
+**A table** — `db/migrations/0003_<name>.sql`, append to `MIGRATIONS` in
 `db/mod.rs`, add `db/<name>.rs` with functions taking `&Database` (see
-`users.rs`), unit-test with `Database::open_in_memory()`.
+`users.rs`), unit-test with `Database::open_in_memory().await`.
 
 **A setting** — add the field to `AppSettings` (`db/settings.rs`, with a default)
 and to the TS interface; `save_settings` applies side effects.
@@ -94,8 +103,9 @@ capability in `src-tauri/capabilities/`, and give it its own HTML entry in
 
 ## Security posture
 
-- The DB key never touches disk; the DB file is useless without the keychain
-  entry of the same OS account.
+- The DB key is held in the OS keychain, not written to an application file.
+  Turso uses AEGIS-256 authenticated page encryption (experimental upstream).
+  See [DATABASE.md](DATABASE.md) for migration and encryption limits.
 - The webview gets only what commands return. Nothing in `src/` reads files or
   secrets directly.
 - CSP is set in `tauri.conf.json`; capabilities grant only the plugins used.

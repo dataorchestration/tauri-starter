@@ -37,8 +37,12 @@ impl AppPaths {
         })
     }
 
-    pub fn db_file(&self) -> PathBuf {
+    pub fn legacy_db_file(&self) -> PathBuf {
         self.data.join("app.sqlite")
+    }
+
+    pub fn db_file(&self) -> PathBuf {
+        self.data.join("app.turso.sqlite")
     }
 }
 
@@ -67,7 +71,7 @@ mod tests {
         let p = AppPaths::in_dirs(root.join("data"), root.join("logs")).unwrap();
         assert!(p.crashes.is_dir());
         assert!(p.logs.is_dir());
-        assert_eq!(p.db_file().file_name().unwrap(), "app.sqlite");
+        assert_eq!(p.db_file().file_name().unwrap(), "app.turso.sqlite");
         let _ = fs::remove_dir_all(root);
     }
 
