@@ -1,0 +1,45 @@
+# Manual Rust gate: clippy + tests. Not in push/PR CI because both compile the
+# whole crate (incl. vendored SQLCipher/OpenSSL). Run from the Actions tab →
+# "Rust checks" → Run workflow and pick the OS; Linux is the cheap default
+# (macOS minutes bill at 10x, Windows at 2x on the free plan).
+name: Rust checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: Runner
+        type: choice
+        options: [ubuntu-22.04, macos-14, windows-latest]
+        default: ubuntu-22.04
+
+jobs:
+  rust:
+    name: clippy + test (${{ inputs.os }})
+    runs-on: ${{ inputs.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux build deps (webkit2gtk, appindicator)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      # SQLCipher's vendored OpenSSL needs perl + nasm on MSVC.
+      - name: Windows build deps (nasm)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Rust clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --all-targets
